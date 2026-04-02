@@ -2,13 +2,17 @@
   <img src="assets/firehorselogo.png" alt="Firehorse" width="400">
 </p>
 
-# Firehorse
+<p align="center">
+  <a href="https://docs.openreward.ai/">
+    <img src="https://img.shields.io/badge/docs-docs.openreward.ai-blue" alt="Docs">
+  </a>
+</p>
 
-**Agent evaluation harness for [OpenReward](https://openreward.ai) environments.**
+🔥🐴 Firehorse is a library of agent harnesses that can be used to run models against [OpenReward environments](https://openreward.ai/environments).
 
-[![Docs](https://img.shields.io/badge/docs-docs.openreward.ai-blue)](https://docs.openreward.ai/)
+It automatically bridges popular harnesses such as Claude Code, Codex and ReAct with OpenReward environments, allowing you to quickly evaluate models without setting up environment infrastructure yourself. 
 
-Firehorse runs AI agents against OpenReward task environments, manages concurrent trial execution, and produces structured trajectory logs and aggregate results. It supports multiple agent architectures and LLM providers out of the box.
+When running an evaluation, Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results. It supports multiple LLM providers out of the box.
 
 ## Features
 
