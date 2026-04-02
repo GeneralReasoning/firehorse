@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/firehorselogo.png" alt="Firehorse" width="400">
+</p>
+
 # Firehorse
 
 **Agent evaluation harness for [OpenReward](https://openreward.ai) environments.**
