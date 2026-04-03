@@ -57,6 +57,8 @@ class ReSumAgent(BaseAgent):
         print(f"[resum] Provider={provider_name} model={model_id}", file=sys.stderr)
         if provider.context_window:
             print(f"[resum] Context window: {provider.context_window:,} tokens", file=sys.stderr)
+        if ctx.effort:
+            print(f"[resum] Thinking effort: {ctx.effort}", file=sys.stderr)
 
         # --- Format tools ---
         tools = provider.format_tools(ctx.tools)
@@ -118,7 +120,7 @@ class ReSumAgent(BaseAgent):
 
             for step in range(max_turns):
                 # Call the LLM
-                response = await provider.call(messages, tools)
+                response = await provider.call(messages, tools, effort=ctx.effort)
 
                 # Handle context overflow — 3-layer strategy:
                 # 1. Micro-compact (clear old tool results, no API call)

@@ -98,6 +98,7 @@ class OpenAIProvider(ProviderClient):
         messages: list[dict],
         tools: list[dict],
         max_tokens: int = 16384,
+        effort: str | None = None,
     ) -> LLMResponse:
         import openai as openai_mod
 
@@ -108,12 +109,13 @@ class OpenAIProvider(ProviderClient):
         }
         if tools:
             kwargs["tools"] = tools
+        if effort:
+            kwargs["reasoning_effort"] = "high" if effort == "max" else effort
 
         last_err: Exception | None = None
         for attempt in range(5):
             try:
                 response = await self._client.chat.completions.create(**kwargs)
-                break
             except openai_mod.BadRequestError as e:
                 err_msg = str(e).lower()
                 if "context length" in err_msg or "maximum" in err_msg and "token" in err_msg:
@@ -124,6 +126,16 @@ class OpenAIProvider(ProviderClient):
                 wait = min(2 ** attempt, 60)
                 print(f"[resum/openai] Retry {attempt + 1}/5 after {type(e).__name__}, waiting {wait}s", file=sys.stderr)
                 await asyncio.sleep(wait)
+                continue
+
+            if not response.choices:
+                last_err = RuntimeError("LLM returned empty choices")
+                wait = min(2 ** attempt, 60)
+                print(f"[resum/openai] Retry {attempt + 1}/5: response.choices is None/empty, waiting {wait}s", file=sys.stderr)
+                await asyncio.sleep(wait)
+                continue
+
+            break
         else:
             raise last_err  # type: ignore[misc]
 
@@ -143,10 +155,17 @@ class OpenAIProvider(ProviderClient):
                     arguments=args,
                 ))
 
+        # Extract reasoning content from model_extra (OpenRouter returns this
+        # for models with thinking/reasoning, e.g. Gemini, DeepSeek-R1).
+        reasoning_content = None
+        if hasattr(msg, "model_extra") and msg.model_extra:
+            reasoning_content = msg.model_extra.get("reasoning")
+
         return LLMResponse(
             raw_message=msg,
             tool_calls=tool_calls,
             text_content=msg.content,
+            reasoning_content=reasoning_content,
             input_tokens=response.usage.prompt_tokens if response.usage else None,
             output_tokens=response.usage.completion_tokens if response.usage else None,
         )
@@ -234,4 +253,6 @@ class OpenAIProvider(ProviderClient):
             messages=messages,
             max_tokens=max_tokens,
         )
+        if not response.choices:
+            return ""
         return response.choices[0].message.content or ""

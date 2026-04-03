@@ -70,6 +70,7 @@ class AnthropicProvider(ProviderClient):
         messages: list[dict],
         tools: list[dict],
         max_tokens: int = 16384,
+        effort: str | None = None,
     ) -> LLMResponse:
         import anthropic as anthropic_mod
 
@@ -81,6 +82,9 @@ class AnthropicProvider(ProviderClient):
         }
         if tools:
             kwargs["tools"] = tools
+        if effort:
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["effort"] = effort
 
         last_err: Exception | None = None
         for attempt in range(5):

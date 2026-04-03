@@ -118,6 +118,15 @@ By default, MCP tool descriptions are overridden with rich descriptions extracte
 
 Use `--use-env-descriptions` to use the environment's original tool descriptions instead.
 
+## Context Compaction Limitation
+
+Claude Code has built-in auto-compaction that triggers at ~93% of the context window. However, **this does not work for non-Anthropic models routed through OpenRouter**. Two factors prevent it:
+
+1. **Zero per-turn token reporting** — OpenRouter returns `input_tokens: 0` in streamed responses for many providers (e.g., Google Gemini). Claude Code tracks context usage from these per-turn values, so it always thinks the context is empty and never triggers compaction.
+2. **Model capability detection disabled** — Claude Code's `isFirstPartyAnthropicBaseUrl()` returns `false` when `ANTHROPIC_BASE_URL` points to OpenRouter, which blocks dynamic context window detection.
+
+**Workaround:** For long-horizon tasks with non-Anthropic models, use `--agent resum` instead. ReSum implements its own 3-layer compaction strategy (micro-compaction, LLM summarization, fallback pruning) that works with any provider.
+
 ## Thinking / Reasoning
 
 Claude Code emits thinking blocks in its stream-json output. Firehorse captures these for both logging targets:

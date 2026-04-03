@@ -55,11 +55,15 @@ class ProviderClient(ABC):
         messages: list[Any],
         tools: Any,
         max_tokens: int = 16384,
+        effort: str | None = None,
     ) -> LLMResponse:
         """Call the LLM and return a normalized response.
 
         On context overflow, return LLMResponse(context_overflow=True)
         instead of raising, so the agent loop can handle compaction.
+
+        effort: Thinking/reasoning effort level ("low", "medium", "high", "max").
+        Provider implementations map this to their native thinking parameters.
         """
 
     @abstractmethod

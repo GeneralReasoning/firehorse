@@ -84,6 +84,28 @@ ReSum produces two output files per trial when `output_dir` is set:
 
 If `ctx.logging` is enabled with a rollout client, events are also streamed to the OpenReward rollout API for live monitoring.
 
+## Thinking / Reasoning
+
+The `--effort` flag controls thinking/reasoning effort for the ReSum agent, using the same provider-specific mappings as the `react` agent:
+
+```bash
+# Anthropic with adaptive thinking
+firehorse --env MyOrg/my-env --agent resum \
+  --model anthropic/claude-sonnet-4-6 --effort high
+
+# Google Gemini with thinking enabled
+firehorse --env MyOrg/my-env --agent resum \
+  --model google/gemini-3.1-flash-lite-preview --effort high
+```
+
+- **Anthropic**: Adaptive thinking with `effort` parameter (low/medium/high/max)
+- **OpenAI**: `reasoning_effort` for o-series models only
+- **Google Gemini 3.x**: `thinking_level` (low/medium/high)
+- **Google Gemini 2.5**: `thinking_budget_tokens` (1024/5000/16000/24576)
+- **OpenRouter**: Passes through to underlying provider
+
+Note: Compaction calls (summarization) do not use thinking — only the main agent loop does.
+
 ## Conversation Compaction
 
 Compaction is the mechanism that lets ReSum handle tasks that exceed a model's context window. ReSum uses a 3-layer strategy inspired by research into how Claude Code, Codex CLI, Aider, and other production agent frameworks manage context.

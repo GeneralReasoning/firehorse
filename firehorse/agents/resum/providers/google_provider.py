@@ -106,11 +106,27 @@ class GoogleProvider(ProviderClient):
             ),
         ]
 
+    def _build_thinking_config(self, effort: str | None) -> Any:
+        """Build Gemini thinking config based on effort level and model version."""
+        if not effort:
+            return None
+        from google.genai import types
+
+        # Gemini 3.x uses thinking_level
+        if any(v in self.model for v in ("3.0", "3.1", "3.2")):
+            level = "high" if effort == "max" else effort
+            return types.ThinkingConfig(thinking_level=level)
+
+        # Gemini 2.5 uses thinking_budget_tokens
+        budgets = {"low": 1024, "medium": 5000, "high": 16000, "max": 24576}
+        return types.ThinkingConfig(thinking_budget_tokens=budgets.get(effort, 16000))
+
     async def call(
         self,
         messages: list[Any],
         tools: list[Any],
         max_tokens: int = 16384,
+        effort: str | None = None,
     ) -> LLMResponse:
         from google.genai import types
 
@@ -119,6 +135,7 @@ class GoogleProvider(ProviderClient):
             max_output_tokens=max_tokens,
             safety_settings=self._build_safety_settings(),
             system_instruction=self._system_prompt,
+            thinking_config=self._build_thinking_config(effort),
         )
 
         last_err: Exception | None = None

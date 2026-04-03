@@ -4,6 +4,7 @@ Supports: anthropic, openai, google, openrouter providers.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -226,13 +227,18 @@ class ReactAgent(BaseAgent):
             if ctx.max_turns and turns_used >= ctx.max_turns:
                 break
 
-            message = await client.messages.create(
-                model=model_name,
-                max_tokens=16384,
-                system=SYSTEM_PROMPT,
-                tools=tools,
-                messages=messages,
-            )
+            create_kwargs: dict[str, Any] = {
+                "model": model_name,
+                "max_tokens": 16384,
+                "system": SYSTEM_PROMPT,
+                "tools": tools,
+                "messages": messages,
+            }
+            if ctx.effort:
+                create_kwargs["thinking"] = {"type": "adaptive"}
+                create_kwargs["effort"] = ctx.effort
+
+            message = await client.messages.create(**create_kwargs)
 
             total_input += message.usage.input_tokens
             total_output += message.usage.output_tokens
@@ -354,12 +360,16 @@ class ReactAgent(BaseAgent):
             if ctx.max_turns and turns_used >= ctx.max_turns:
                 break
 
-            response = await client.responses.create(
-                model=model_name,
-                tools=tools,
-                input=input_list,
-                instructions=SYSTEM_PROMPT,
-            )
+            resp_kwargs: dict[str, Any] = {
+                "model": model_name,
+                "tools": tools,
+                "input": input_list,
+                "instructions": SYSTEM_PROMPT,
+            }
+            if ctx.effort and any(model_name.startswith(p) for p in ("o3", "o4", "o1")):
+                resp_kwargs["reasoning"] = {"effort": "high" if ctx.effort == "max" else ctx.effort}
+
+            response = await client.responses.create(**resp_kwargs)
 
             if response.usage:
                 total_input += response.usage.input_tokens
@@ -452,9 +462,20 @@ class ReactAgent(BaseAgent):
         client = genai.Client()
         tools_spec = await ctx.session.list_tools(format="google")
         genai_tools = [types.Tool(function_declarations=tools_spec)]
+        thinking_config = None
+        if ctx.effort:
+            if any(v in model_name for v in ("3.0", "3.1", "3.2")):
+                level = "high" if ctx.effort == "max" else ctx.effort
+                thinking_config = types.ThinkingConfig(thinking_level=level)
+            else:
+                budgets = {"low": 1024, "medium": 5000, "high": 16000, "max": 24576}
+                thinking_config = types.ThinkingConfig(
+                    thinking_budget_tokens=budgets.get(ctx.effort, 16000)
+                )
         config = types.GenerateContentConfig(
             tools=genai_tools,
             system_instruction=SYSTEM_PROMPT,
+            thinking_config=thinking_config,
         )
         contents: list[Any] = [
             types.Content(role="user", parts=[types.Part(text=ctx.prompt_text)])
@@ -580,16 +601,30 @@ class ReactAgent(BaseAgent):
         last_reward: float | None = None
         total_input = 0
         total_output = 0
+        empty_choice_retries = 0
 
         while not finished:
             if ctx.max_turns and turns_used >= ctx.max_turns:
                 break
 
-            response = await client.chat.completions.create(
-                model=model_name,
-                tools=tools,
-                messages=messages,
-            )
+            or_kwargs: dict[str, Any] = {
+                "model": model_name,
+                "tools": tools,
+                "messages": messages,
+            }
+            if ctx.effort:
+                or_kwargs["reasoning_effort"] = "high" if ctx.effort == "max" else ctx.effort
+
+            response = await client.chat.completions.create(**or_kwargs)
+
+            if not response.choices:
+                empty_choice_retries += 1
+                if empty_choice_retries >= 3:
+                    raise RuntimeError(f"OpenRouter returned empty choices {empty_choice_retries} times consecutively")
+                print(f"[react/openrouter] Warning: response.choices is None/empty, retrying ({empty_choice_retries}/3)...", file=sys.stderr)
+                await asyncio.sleep(min(2 ** empty_choice_retries, 30))
+                continue
+            empty_choice_retries = 0
 
             choice = response.choices[0]
             msg = choice.message

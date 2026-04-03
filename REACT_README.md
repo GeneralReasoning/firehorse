@@ -75,6 +75,32 @@ firehorse CLI
 
 The react agent does NOT use the MCP bridge (`firehorse.mcp`). It calls `session.call_tool()` directly, which is simpler and avoids the subprocess overhead of the `claude-code` agent.
 
+## Thinking / Reasoning
+
+The `--effort` flag enables and controls thinking/reasoning for providers that support it:
+
+```bash
+# Anthropic with adaptive thinking
+firehorse --env MyOrg/my-env --agent react \
+  --model anthropic/claude-sonnet-4-6 --effort high
+
+# Google Gemini with thinking
+firehorse --env MyOrg/my-env --agent react \
+  --model google/gemini-3.1-flash-lite-preview --effort high
+
+# OpenAI o-series with reasoning
+firehorse --env MyOrg/my-env --agent react \
+  --model openai/o3 --effort medium
+```
+
+How effort maps to each provider:
+
+- **Anthropic**: Uses adaptive thinking (`thinking: {type: "adaptive"}` + `effort` parameter). All effort levels supported; `max` only works on Opus.
+- **OpenAI**: Uses `reasoning_effort` for o-series models (o1, o3, o4). Non-o-series models (GPT-4.1, GPT-5.4) ignore the flag.
+- **Google Gemini 3.x**: Uses `thinking_level` (low/medium/high). `max` maps to `high`.
+- **Google Gemini 2.5**: Uses `thinking_budget_tokens` (low=1024, medium=5000, high=16000, max=24576).
+- **OpenRouter**: Passes `reasoning_effort` through for models that support it.
+
 ## Secrets
 
 **LLM API keys** are read from environment variables by the SDK clients automatically. Set the appropriate env var for your provider before running.

@@ -76,6 +76,8 @@ By default, environment tools that overlap with Claude Code built-ins (e.g. `bas
 
 **Providers:** Anthropic, OpenRouter
 
+> **Note:** Claude Code's built-in context compaction does not work for non-Anthropic models via OpenRouter. OpenRouter reports per-turn token usage as zero for many providers, which prevents Claude Code from detecting when the context window is full. For long-horizon tasks with non-Anthropic models, use `--agent resum` instead, which implements its own compaction.
+
 ### `react`
 
 A lightweight Reason-Act loop that calls LLM APIs directly. Each turn, the model receives the conversation history and available tools, produces a response with tool calls, and the harness executes them against the environment session. No subprocess, no MCP — just a direct API loop. Supports native tool-use formats for each provider (Anthropic Messages API, OpenAI Responses API, Google Gemini, OpenRouter Chat Completions).
@@ -93,6 +95,31 @@ Extends the ReAct loop with automatic conversation compaction. When the context 
 Runs the [Codex CLI](https://github.com/openai/codex) with environment tools bridged via MCP. The built-in shell is sandboxed to read-only, and the agent uses environment-provided tools for all interactions. When the environment provides a `bash` tool, redundant filesystem tools (read, write, edit, grep, glob) are excluded from MCP by default. For non-OpenAI providers, a local auth-injecting proxy routes requests through OpenRouter.
 
 **Providers:** OpenAI, OpenRouter, custom
+
+## Thinking / Reasoning
+
+The `--effort` flag controls how much thinking/reasoning the model does. It's supported by `claude-code`, `react`, and `resum` agents. The effort level maps to each provider's native thinking mechanism:
+
+| Provider | Mechanism | low | medium | high | max |
+|---|---|---|---|---|---|
+| **Anthropic** | Adaptive thinking (`effort` param) | low | medium | high | max (Opus only) |
+| **OpenAI** | `reasoning_effort` (o-series only) | low | medium | high | high |
+| **Google Gemini 3.x** | `thinking_level` | low | medium | high | high |
+| **Google Gemini 2.5** | `thinking_budget_tokens` | 1024 | 5000 | 16000 | 24576 |
+| **OpenRouter** | Passes through to underlying provider | — | — | — | — |
+
+```bash
+# High thinking (default)
+firehorse --env MyOrg/my-env --model anthropic/claude-sonnet-4-6 --effort high
+
+# Max thinking for deep reasoning tasks
+firehorse --env MyOrg/my-env --model anthropic/claude-opus-4-6 --effort max
+
+# Low thinking for speed
+firehorse --env MyOrg/my-env --agent react --model google/gemini-3.1-flash-lite-preview --effort low
+```
+
+For `claude-code`, `--effort` is only passed to Anthropic models. For `react` and `resum`, it's mapped to the appropriate provider parameter automatically. Models that don't support thinking (e.g., GPT-4.1) ignore the flag.
 
 ## Environment Variables
 

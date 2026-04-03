@@ -109,7 +109,7 @@ class MockProvider(ProviderClient):
             {"role": "user", "content": user_prompt},
         ]
 
-    async def call(self, messages, tools, max_tokens=16384):
+    async def call(self, messages, tools, max_tokens=16384, effort=None):
         self.call_count += 1
         self.messages_history.append(list(messages))
         if self._call_idx < len(self._responses):
