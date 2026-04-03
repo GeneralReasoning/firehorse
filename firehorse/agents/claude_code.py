@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
+from firehorse.providers import get_openrouter_context_window, FALLBACK_CONTEXT_WINDOW
 
 # Map of lowercase env tool names -> Claude built-in tool names they should replace
 ENV_TO_BUILTIN = {
@@ -37,7 +38,6 @@ SUBMISSION_TOOL_NAMES = {"submit", "answer", "submit_answer"}
 # asyncio defaults to 64KB which is too small for large JSONL lines
 # (e.g. thinking blocks, large tool outputs).
 _SUBPROCESS_LINE_LIMIT = 10 * 1024 * 1024  # 10 MB
-
 
 def _openrouter_env(or_key: str) -> dict[str, str]:
     """Build env vars to route Claude Code through OpenRouter's Anthropic-compatible endpoint."""
@@ -348,6 +348,26 @@ class ClaudeCodeAgent(BaseAgent):
 
             # Resolve model and provider
             model_name, extra_env, is_anthropic = _resolve_model(ctx.model, ctx.provider_url)
+
+            # For non-Anthropic models via OpenRouter, Claude Code's auto-compaction
+            # won't trigger because isFirstPartyAnthropicBaseUrl() returns false when
+            # ANTHROPIC_BASE_URL points to OpenRouter. Set CLAUDE_CODE_AUTO_COMPACT_WINDOW
+            # so Claude Code knows the real context window and compacts at the right threshold.
+            if not is_anthropic and "ANTHROPIC_BASE_URL" in extra_env:
+                context_window = await get_openrouter_context_window(model_name)
+                if context_window:
+                    extra_env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(context_window)
+                    print(
+                        f"[claude-code] Context window for {model_name}: {context_window:,} tokens",
+                        file=sys.stderr,
+                    )
+                else:
+                    extra_env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(FALLBACK_CONTEXT_WINDOW)
+                    print(
+                        f"[claude-code] Could not detect context window for {model_name}, "
+                        f"using fallback: {FALLBACK_CONTEXT_WINDOW:,} tokens",
+                        file=sys.stderr,
+                    )
 
             # Compute which built-in tools to disable
             auto_disallow = _compute_disallowed_builtins(env_tool_names)

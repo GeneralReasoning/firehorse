@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
+
 from firehorse.agents.resum.providers.openai_provider import OpenAIProvider
+from firehorse.providers import get_openrouter_context_window
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Context windows for models commonly accessed via OpenRouter.
 # Model IDs here are the OpenRouter format (already stripped of "openrouter/" prefix).
+# Used as a fast lookup before falling back to the OpenRouter API.
 OPENROUTER_CONTEXT_WINDOWS = {
     # DeepSeek
     "deepseek/deepseek-v3.2": 163840,
@@ -41,6 +45,9 @@ OPENROUTER_CONTEXT_WINDOWS = {
     "anthropic/claude-haiku-4-5-20251001": 200000,
 }
 
+# Cache for dynamic lookups so we only hit the API once per model.
+_dynamic_context_cache: dict[str, int | None] = {}
+
 
 class OpenRouterProvider(OpenAIProvider):
     """OpenRouter provider — OpenAI-compatible with a different base URL."""
@@ -52,4 +59,22 @@ class OpenRouterProvider(OpenAIProvider):
     def context_window(self) -> int | None:
         if self._context_window_override is not None:
             return self._context_window_override
-        return OPENROUTER_CONTEXT_WINDOWS.get(self.model)
+        # Fast path: hardcoded table
+        window = OPENROUTER_CONTEXT_WINDOWS.get(self.model)
+        if window is not None:
+            return window
+        # Slow path: check cache from dynamic API lookup
+        return _dynamic_context_cache.get(self.model)
+
+    async def resolve_context_window(self) -> None:
+        """Fetch context window from OpenRouter API if not already known.
+
+        Call this once before starting the agent loop so that
+        should_compact_proactively has an accurate context_window.
+        """
+        if self.context_window is not None:
+            return
+        if self.model in _dynamic_context_cache:
+            return
+        window = await get_openrouter_context_window(self.model)
+        _dynamic_context_cache[self.model] = window

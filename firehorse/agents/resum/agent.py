@@ -49,7 +49,14 @@ class ReSumAgent(BaseAgent):
         api_key = resolve_api_key(provider_name, ctx.secrets)
         provider = get_provider(provider_name, model_id, api_key, ctx.provider_url, ctx.context_window)
 
+        # Resolve context window dynamically for providers that support it
+        # (e.g., OpenRouter models not in the hardcoded lookup table).
+        if hasattr(provider, "resolve_context_window"):
+            await provider.resolve_context_window()
+
         print(f"[resum] Provider={provider_name} model={model_id}", file=sys.stderr)
+        if provider.context_window:
+            print(f"[resum] Context window: {provider.context_window:,} tokens", file=sys.stderr)
 
         # --- Format tools ---
         tools = provider.format_tools(ctx.tools)
