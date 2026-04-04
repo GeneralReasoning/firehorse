@@ -6,8 +6,10 @@ the session's tools over MCP stdio transport.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import random
 import sys
 import time
 from typing import Any
@@ -78,11 +80,30 @@ class OpenRewardBridge:
             namespace=namespace,
         )
 
-        self._session = env.session(task, secrets)
-        await self._session.__aenter__()
-        self._session_entered = True
-
-        all_tools = await self._session.list_tools()
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._session = env.session(task, secrets)
+                await self._session.__aenter__()
+                self._session_entered = True
+                all_tools = await self._session.list_tools()
+                break
+            except Exception as e:
+                if attempt == max_attempts:
+                    raise
+                delay = 2 ** attempt + random.uniform(0, 1.0)
+                print(
+                    f"[openreward-bridge] Init failed (attempt {attempt}/{max_attempts}): {e}, "
+                    f"retrying in {delay:.1f}s",
+                    file=sys.stderr,
+                )
+                if self._session_entered:
+                    try:
+                        await self._session.__aexit__(None, None, None)
+                    except Exception:
+                        pass
+                    self._session_entered = False
+                await asyncio.sleep(delay)
 
         # Filter out env tools that duplicate Claude's built-in planning tools.
         exclude = os.environ.get("OPENREWARD_EXCLUDE_TOOLS", "").split(",")

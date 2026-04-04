@@ -613,7 +613,7 @@ class ReactAgent(BaseAgent):
                 "messages": messages,
             }
             if ctx.effort:
-                or_kwargs["reasoning_effort"] = "high" if ctx.effort == "max" else ctx.effort
+                or_kwargs["reasoning_effort"] = "xhigh" if ctx.effort == "max" else ctx.effort
 
             response = await client.chat.completions.create(**or_kwargs)
 

@@ -84,7 +84,7 @@ class AnthropicProvider(ProviderClient):
             kwargs["tools"] = tools
         if effort:
             kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["effort"] = effort
+            kwargs["output_config"] = {"effort": effort}
 
         last_err: Exception | None = None
         for attempt in range(5):
@@ -144,10 +144,13 @@ class AnthropicProvider(ProviderClient):
                     "input": block.input,
                 })
             elif block.type == "thinking":
-                content.append({
+                entry = {
                     "type": "thinking",
                     "thinking": block.thinking,
-                })
+                }
+                if hasattr(block, "signature") and block.signature:
+                    entry["signature"] = block.signature
+                content.append(entry)
         messages.append({"role": "assistant", "content": content})
 
     def append_tool_result(

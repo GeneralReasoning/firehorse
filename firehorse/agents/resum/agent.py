@@ -106,7 +106,7 @@ class ReSumAgent(BaseAgent):
         self._log_rollout_system_and_prompt(rollout, SYSTEM_PROMPT, ctx.prompt_text)
 
         # --- Core loop ---
-        max_turns = ctx.max_turns or 200
+        max_turns = ctx.max_turns
         turns_used = 0
         total_input_tokens = 0
         total_output_tokens = 0
@@ -118,7 +118,9 @@ class ReSumAgent(BaseAgent):
         try:
             micro_compacted = False  # Track whether micro-compaction was already tried
 
-            for step in range(max_turns):
+            step = 0
+            while max_turns is None or step < max_turns:
+                step += 1
                 # Call the LLM
                 response = await provider.call(messages, tools, effort=ctx.effort)
 

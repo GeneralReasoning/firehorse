@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import sys
 import time
 from typing import Any, TYPE_CHECKING
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from openreward.api.environments.types import Task
     from firehorse.agents.base import BaseAgent
 
-_MCP_RETRY_MAX = 3
+_MCP_RETRY_MAX = 8
 _MCP_RETRY_BASE_DELAY = 2.0  # seconds, exponential backoff: 2s, 4s, 8s
 
 
@@ -72,7 +73,7 @@ async def run_trial(
 
             attempt = 1
             while _is_mcp_failure(result) and attempt < _MCP_RETRY_MAX:
-                delay = _MCP_RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                delay = _MCP_RETRY_BASE_DELAY * (2 ** (attempt - 1)) + random.uniform(0, 2.0)
                 print(
                     f"[trial] MCP connection failed (attempt {attempt}/{_MCP_RETRY_MAX}), "
                     f"retrying in {delay:.0f}s...",

@@ -102,15 +102,18 @@ class OpenAIProvider(ProviderClient):
     ) -> LLMResponse:
         import openai as openai_mod
 
+        # Newer OpenAI models (gpt-5.x, o-series) require max_completion_tokens
+        uses_completion_tokens = any(self.model.startswith(p) for p in ("gpt-5", "o3", "o4", "o1"))
+        token_key = "max_completion_tokens" if uses_completion_tokens else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            token_key: max_tokens,
         }
         if tools:
             kwargs["tools"] = tools
         if effort:
-            kwargs["reasoning_effort"] = "high" if effort == "max" else effort
+            kwargs["reasoning_effort"] = "xhigh" if effort == "max" else effort
 
         last_err: Exception | None = None
         for attempt in range(5):
@@ -248,10 +251,12 @@ class OpenAIProvider(ProviderClient):
         messages = [
             {"role": "user", "content": f"Here is the conversation history:\n\n{conversation_text}\n\n{compaction_prompt}"},
         ]
+        uses_completion_tokens = any(self.model.startswith(p) for p in ("gpt-5", "o3", "o4", "o1"))
+        token_key = "max_completion_tokens" if uses_completion_tokens else "max_tokens"
         response = await self._client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=max_tokens,
+            **{token_key: max_tokens},
         )
         if not response.choices:
             return ""

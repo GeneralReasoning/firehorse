@@ -665,7 +665,7 @@ class ClaudeCodeAgent(BaseAgent):
                             "input_tokens": input_tokens,
                             "output_tokens": output_tokens,
                         },
-                        "error": None,
+                        "error": "MCP server 'openreward' failed to connect — no environment tools available" if mcp_failed else None,
                         "rollout_url": f"https://openreward.ai/rollout/{main_rollout.event_id}" if main_rollout else None,
                     }
                     result_json_path = log_dir / f"trial_{trial_id}_result.json"

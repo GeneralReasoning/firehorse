@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -122,6 +123,10 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
     async def run_with_semaphore(task, idx: int) -> TrialResult:
         nonlocal completed_count
         async with semaphore:
+            # Stagger trial starts to avoid thundering herd on MCP/API connections
+            if config.n_concurrent > 1:
+                jitter = random.uniform(0, config.n_concurrent * 1.0)
+                await asyncio.sleep(jitter)
             trial_config = TrialConfig(
                 task_index=idx,
                 task_spec=dict(task.task_spec),
