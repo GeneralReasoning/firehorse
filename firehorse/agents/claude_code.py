@@ -373,7 +373,7 @@ class ClaudeCodeAgent(BaseAgent):
                 "--output-format", "stream-json",
                 "--model", model_name,
                 "--mcp-config", str(mcp_config_path),
-                "--permission-mode", "bypassPermissions",
+                "--permission-mode", "plan" if ctx.plan_mode else "bypassPermissions",
                 "--no-session-persistence",
             ]
 

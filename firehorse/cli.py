@@ -17,6 +17,8 @@ async def command_run(
     n_concurrent: int = 1,
     split: str = "test",
     max_tasks: int | None = None,
+    skip_tasks: int = 0,
+    plan_mode: bool = False,
     run_name: str | None = None,
     max_turns: int | None = None,
     provider_url: str | None = None,
@@ -39,6 +41,8 @@ async def command_run(
         n_concurrent=n_concurrent,
         split=split,
         max_tasks=max_tasks,
+        skip_tasks=skip_tasks,
+        plan_mode=plan_mode,
         run_name=run_name,
         max_turns=max_turns,
         provider_url=provider_url,
@@ -66,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-concurrent", type=int, default=1, help="Max parallel trials (default: 1)")
     parser.add_argument("--split", default="test", help="Which split to evaluate (default: test)")
     parser.add_argument("--max-tasks", type=int, default=None, help="Limit number of tasks")
+    parser.add_argument("--skip-tasks", type=int, default=0, help="Skip first N tasks (default: 0)")
     parser.add_argument("--run-name", default=None, help="Name for this run")
     parser.add_argument("--max-turns", type=int, default=None, help="Max tool call turns per trial")
     parser.add_argument(
@@ -79,6 +84,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-builtin-tools", default=None,
         help="Comma-separated list of Claude built-in tools to disable",
+    )
+    parser.add_argument(
+        "--plan-mode", action="store_true", default=False,
+        help="Enable Claude Code plan mode (claude-code agent only)",
     )
     parser.add_argument(
         "--no-logging", action="store_true", default=False,
@@ -123,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             n_concurrent=args.n_concurrent,
             split=args.split,
             max_tasks=args.max_tasks,
+            skip_tasks=args.skip_tasks,
+            plan_mode=args.plan_mode,
             run_name=args.run_name,
             max_turns=args.max_turns,
             provider_url=args.provider_url,

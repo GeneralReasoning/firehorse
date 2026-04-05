@@ -59,6 +59,8 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # List tasks
     tasks = await env.list_tasks(config.split)
+    if config.skip_tasks:
+        tasks = tasks[config.skip_tasks:]
     if config.max_tasks is not None:
         tasks = tasks[: config.max_tasks]
 
@@ -143,6 +145,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 logging=config.logging,
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
+                plan_mode=config.plan_mode,
             )
             result = await run_trial(
                 env, task, agent, trial_config,

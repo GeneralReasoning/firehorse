@@ -29,6 +29,7 @@ class TrialContext:
     logging: bool = True
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False  # Codex: expose all filesystem tools via MCP, not just bash
+    plan_mode: bool = False
     rollout_client: Any = None  # AsyncOpenReward, for creating rollouts
     context_window: int | None = None  # Override model's default context window size
 

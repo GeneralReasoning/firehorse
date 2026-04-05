@@ -113,7 +113,11 @@ class OpenAIProvider(ProviderClient):
         if tools:
             kwargs["tools"] = tools
         if effort:
-            kwargs["reasoning_effort"] = "xhigh" if effort == "max" else effort
+            mapped = "xhigh" if effort == "max" else effort
+            kwargs["reasoning_effort"] = mapped
+            # Also send OpenRouter's unified reasoning format via extra_body.
+            # Direct OpenAI ignores extra_body fields it doesn't recognize.
+            kwargs["extra_body"] = {"reasoning": {"effort": mapped}}
 
         last_err: Exception | None = None
         for attempt in range(5):
@@ -159,10 +163,13 @@ class OpenAIProvider(ProviderClient):
                 ))
 
         # Extract reasoning content from model_extra (OpenRouter returns this
-        # for models with thinking/reasoning, e.g. Gemini, DeepSeek-R1).
+        # for models with thinking/reasoning, e.g. Gemini, DeepSeek-R1, Grok).
         reasoning_content = None
         if hasattr(msg, "model_extra") and msg.model_extra:
-            reasoning_content = msg.model_extra.get("reasoning")
+            reasoning_content = (
+                msg.model_extra.get("reasoning")
+                or msg.model_extra.get("reasoning_content")
+            )
 
         return LLMResponse(
             raw_message=msg,

@@ -12,6 +12,8 @@ class RunConfig:
     n_concurrent: int = 1
     split: str = "test"
     max_tasks: int | None = None
+    skip_tasks: int = 0
+    plan_mode: bool = False
     run_name: str | None = None
     max_turns: int | None = None
     provider_url: str | None = None
@@ -22,6 +24,7 @@ class RunConfig:
     logging: bool = True
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
+    plan_mode: bool = False
 
     def effective_run_name(self) -> str:
         if self.run_name:
@@ -47,3 +50,4 @@ class TrialConfig:
     logging: bool = True
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
+    plan_mode: bool = False

@@ -66,6 +66,7 @@ async def run_trial(
                 logging=config.logging,
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
+                plan_mode=config.plan_mode,
                 rollout_client=rollout_client,
             )
 
