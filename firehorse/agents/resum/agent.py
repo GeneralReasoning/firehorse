@@ -7,6 +7,9 @@ import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from openreward import (
+    AssistantMessage, ReasoningItem, SystemMessage, ToolCall, ToolResult, UserMessage,
+)
 from firehorse.agents.base import AgentResult, BaseAgent, TrialContext
 from firehorse.agents.resum.compaction import CompactionResult, compact_conversation, micro_compact, should_compact_proactively
 from firehorse.agents.resum.providers import get_provider, parse_provider, resolve_api_key
@@ -331,7 +334,6 @@ class ReSumAgent(BaseAgent):
         # Rollout
         if rollout:
             try:
-                from openreward import AssistantMessage, ReasoningItem
                 if response.reasoning_content:
                     rollout.log(ReasoningItem(content=response.reasoning_content))
                 if response.text_content:
@@ -348,7 +350,6 @@ class ReSumAgent(BaseAgent):
         })
         if rollout:
             try:
-                from openreward import ToolCall
                 rollout.log(ToolCall(
                     name=tc.name,
                     content=json.dumps(tc.arguments),
@@ -375,7 +376,6 @@ class ReSumAgent(BaseAgent):
         })
         if rollout:
             try:
-                from openreward import ToolResult
                 rollout.log(
                     ToolResult(content=output[:10000], call_id=call_id),
                     reward=reward,
@@ -408,7 +408,6 @@ class ReSumAgent(BaseAgent):
         # Rollout — log as SystemMessage + ToolCall("compact") + ToolResult
         if rollout:
             try:
-                from openreward import SystemMessage, ToolCall, ToolResult
                 trigger = "proactive" if proactive else "reactive"
                 compact_call_id = f"compact_{compaction_count}"
 
@@ -454,7 +453,6 @@ class ReSumAgent(BaseAgent):
     def _log_rollout_system_and_prompt(self, rollout: Any, system_prompt: str, user_prompt: str) -> None:
         if rollout:
             try:
-                from openreward import SystemMessage, UserMessage
                 rollout.log(SystemMessage(content=system_prompt))
                 rollout.log(UserMessage(content=user_prompt))
             except Exception:

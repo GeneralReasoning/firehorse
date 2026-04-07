@@ -1,3 +1,12 @@
+"""
+TODO possibly add tests:
+  - task loading and slicing (max_tasks, skip_tasks) with a mocked AsyncOpenReward client.
+  - Concurrency limiting (n_concurrent) — verify semaphore behavior.
+  - Result aggregation (RunSummary.from_results()) with mixed success/failure.
+  - Error handling when environment or task loading fails.
+
+Alternatively just more E2E unless im missing something
+"""
 from __future__ import annotations
 
 import asyncio

@@ -1,7 +1,9 @@
-"""Tests for firehorse.agents.codex helper functions."""
+"""Tests for firehorse.agents.codex helper functions.
+
+TODO: Ideally add unit tests here to for CodexAgent.run() with a mocked subprocess
+"""
 from __future__ import annotations
 
-import base64
 import json
 import os
 from unittest import mock

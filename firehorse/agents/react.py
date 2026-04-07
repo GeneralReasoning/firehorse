@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, IO
 
+from openreward import SystemMessage, UserMessage
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
 
@@ -68,6 +69,10 @@ def _format_tool_output_anthropic(output: Any) -> list[dict]:
     return blocks or [{"type": "text", "text": ""}]
 
 
+# TODO: JSONL event schemas differ across agents. Claude Code and Codex pass through agent events verbatim, while ReAct and ReSum define their own schemas
+# We should either normalize all agents to a shared event schema (e.g. always "assistant", "tool_call", "tool_result", "summary")
+# or document the the agent schemas so people know what to expect.
+
 def _jsonl_write(log_file: IO | None, event: dict) -> None:
     if log_file is not None:
         log_file.write(json.dumps(event, default=str) + "\n")
@@ -117,7 +122,6 @@ class ReactAgent(BaseAgent):
         _jsonl_write(log_file, {"type": "user", "content": ctx.prompt_text})
 
         if rollout:
-            from openreward import SystemMessage, UserMessage
             try:
                 rollout.log(SystemMessage(content=SYSTEM_PROMPT))
                 rollout.log(UserMessage(content=ctx.prompt_text))

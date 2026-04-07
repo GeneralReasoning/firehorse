@@ -8,6 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from openreward import (
+    AssistantMessage, UserMessage, ReasoningItem, ToolCall, ToolResult,
+)
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
 # Map of lowercase env tool names -> Claude built-in tool names they should replace
@@ -36,7 +39,7 @@ SUBMISSION_TOOL_NAMES = {"submit", "answer", "submit_answer"}
 # Buffer limit for subprocess stdout/stderr line reading.
 # asyncio defaults to 64KB which is too small for large JSONL lines
 # (e.g. thinking blocks, large tool outputs).
-_SUBPROCESS_LINE_LIMIT = 10 * 1024 * 1024  # 10 MB
+_SUBPROCESS_LINE_LIMIT = 500 * 1024  # 500 KB
 
 def _openrouter_env(or_key: str) -> dict[str, str]:
     """Build env vars to route Claude Code through OpenRouter's Anthropic-compatible endpoint."""
@@ -195,10 +198,6 @@ def _sanitize_prompt(text: str) -> str:
 
 def _log_event_to_rollout(event: dict, rollout: Any) -> None:
     """Parse a Claude stream-json event and log it to an OpenReward rollout."""
-    from openreward import (
-        AssistantMessage, UserMessage, ReasoningItem, ToolCall, ToolResult,
-    )
-
     event_type = event.get("type")
     msg = event.get("message", {})
     if not isinstance(msg, dict):
@@ -390,6 +389,7 @@ class ClaudeCodeAgent(BaseAgent):
                 cmd.extend(["--append-system-prompt", tool_mapping_prompt])
 
             if ctx.max_turns:
+                # TODO: 10 cent a turn is a rough heuristic, can we get real pricing here if we are going to display it
                 budget = max(1.0, ctx.max_turns * 0.10)
                 cmd.extend(["--max-budget-usd", str(budget)])
 
@@ -481,7 +481,6 @@ class ClaudeCodeAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                from openreward import UserMessage
                 try:
                     main_rollout.log(UserMessage(content=full_prompt))
                 except Exception:
@@ -489,7 +488,9 @@ class ClaudeCodeAgent(BaseAgent):
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
-            stdout_lines: list[str] = []
+            # TODO: remove me: i switched this to a rolling buffer, i don't think we need all the lines, it will just keep growing right?
+            stdout_lines: list[str] = []  # rolling buffer, capped to last 50 lines
+            stdout_line_count = 0
             result_event: dict | None = None  # Claude's final 'result' event
             mcp_failed = False
             mcp_failed_tool_calls = 0
@@ -497,13 +498,16 @@ class ClaudeCodeAgent(BaseAgent):
             mcp_result_count = 0
 
             async def read_stdout():
-                nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count
+                nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count, stdout_line_count
                 assert proc.stdout is not None
                 async for line in proc.stdout:
                     line_str = line.decode(errors="replace").strip()
                     if not line_str:
                         continue
+                    stdout_line_count += 1
                     stdout_lines.append(line_str)
+                    if len(stdout_lines) > 50:
+                        stdout_lines.pop(0)
                     try:
                         event = json.loads(line_str)
                     except json.JSONDecodeError:
@@ -698,13 +702,13 @@ class ClaudeCodeAgent(BaseAgent):
 
             # No result file
             if stdout_lines:
-                print(f"[claude-code] stdout ({len(stdout_lines)} lines), last 3:", file=sys.stderr)
+                print(f"[claude-code] stdout ({stdout_line_count} lines), last 3:", file=sys.stderr)
                 for line in stdout_lines[-3:]:
                     print(f"  {line[:300]}", file=sys.stderr)
 
             return AgentResult(
                 success=False,
-                error=f"No result file produced. Exit code: {proc.returncode}. stdout_lines: {len(stdout_lines)}",
+                error=f"No result file produced. Exit code: {proc.returncode}. stdout_lines: {stdout_line_count}",
                 turns_used=turns_used,
                 cost_usd=cost_usd,
                 input_tokens=input_tokens,

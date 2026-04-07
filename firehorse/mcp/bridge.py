@@ -3,6 +3,9 @@
 Launched as a subprocess by ClaudeCodeAgent. Receives configuration
 via environment variables, creates an OpenReward session, and exposes
 the session's tools over MCP stdio transport.
+
+TODO: Add unit tests for this module. Key things to test:
+  - probably just E2E, use mcp's test client to send list_tools/call_tool requests over in-memory streams instead of stdio.
 """
 from __future__ import annotations
 
@@ -81,12 +84,13 @@ class OpenRewardBridge:
         )
 
         max_attempts = 3
+        per_attempt_timeout = 60  # seconds — prevents hanging on unresponsive API
         for attempt in range(1, max_attempts + 1):
             try:
                 self._session = env.session(task, secrets)
-                await self._session.__aenter__()
+                await asyncio.wait_for(self._session.__aenter__(), timeout=per_attempt_timeout)
                 self._session_entered = True
-                all_tools = await self._session.list_tools()
+                all_tools = await asyncio.wait_for(self._session.list_tools(), timeout=per_attempt_timeout)
                 break
             except Exception as e:
                 if attempt == max_attempts:

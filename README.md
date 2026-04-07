@@ -148,9 +148,11 @@ Options:
   --split            Task split to evaluate (default: test)
   --n-concurrent     Max parallel trials (default: 1)
   --max-tasks        Limit number of tasks to evaluate
+  --skip-tasks N     Skip first N tasks (default: 0)
   --max-turns        Max tool call turns per trial
   --run-name         Name for this evaluation run
   --effort           Thinking effort: low, medium, high, max (default: high)
+  --plan-mode        Enable Claude Code plan mode (claude-code agent only)
   --provider-url     Custom API base URL for non-standard endpoints
   --output-dir       Directory for JSONL trajectory logs and results
   --secret KEY=VAL   Inject a session secret (repeatable)

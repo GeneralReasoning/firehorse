@@ -38,6 +38,10 @@ async def get_openrouter_context_window(model_name: str) -> int | None:
         for model in data.get("data", []):
             if model.get("id") == model_name:
                 return model.get("context_length")
-    except Exception:
-        pass
+    except Exception as e:
+        # TODO: log this properly. Silent fallback to FALLBACK_CONTEXT_WINDOW (128K)
+        # can cause compaction to trigger too early or too late for models with
+        # different actual context sizes.
+        import sys
+        print(f"[providers] Failed to fetch context window for {model_name}: {e}", file=sys.stderr)
     return None

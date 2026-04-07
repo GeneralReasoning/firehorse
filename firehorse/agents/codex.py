@@ -10,6 +10,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openreward import (
+    AssistantMessage, ReasoningItem, SystemMessage, ToolCall, ToolResult, UserMessage,
+)
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
 # Env tools with these names are always excluded from MCP —
@@ -193,10 +196,6 @@ def _extract_mcp_text(result_data: Any) -> str:
 
 def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
     """Parse a Codex stream-json event and log it to an OpenReward rollout."""
-    from openreward import (
-        AssistantMessage, ReasoningItem, ToolCall, ToolResult,
-    )
-
     # v0.39: {"id":"0","msg":{"type":"...",...}}
     # v0.118: {"type":"...",...}  (flat structure)
     msg = event.get("msg")
@@ -410,7 +409,7 @@ class CodexAgent(BaseAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
-                limit=1024 * 1024,  # 1MB line limit for large stderr output
+                limit=500 * 1024,  # 500 KB line limit
             )
 
             # --- JSONL logging ---
@@ -447,7 +446,6 @@ class CodexAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                from openreward import SystemMessage, UserMessage
                 try:
                     main_rollout.log(SystemMessage(content=system_prompt))
                     main_rollout.log(UserMessage(content=ctx.prompt_text))
@@ -456,17 +454,21 @@ class CodexAgent(BaseAgent):
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
-            stdout_lines: list[str] = []
+            stdout_lines: list[str] = []  # rolling buffer, capped to last 50 lines
+            stdout_line_count = 0
             token_info: dict | None = None
 
             async def read_stdout():
-                nonlocal turns_used, token_info
+                nonlocal turns_used, token_info, stdout_line_count
                 assert proc.stdout is not None
                 async for line in proc.stdout:
                     line_str = line.decode(errors="replace").strip()
                     if not line_str:
                         continue
+                    stdout_line_count += 1
                     stdout_lines.append(line_str)
+                    if len(stdout_lines) > 50:
+                        stdout_lines.pop(0)
                     try:
                         event = json.loads(line_str)
                     except json.JSONDecodeError:
@@ -594,13 +596,13 @@ class CodexAgent(BaseAgent):
 
             # No result file
             if stdout_lines:
-                print(f"[codex] stdout ({len(stdout_lines)} lines), last 3:", file=sys.stderr)
+                print(f"[codex] stdout ({stdout_line_count} lines), last 3:", file=sys.stderr)
                 for line in stdout_lines[-3:]:
                     print(f"  {line[:300]}", file=sys.stderr)
 
             return AgentResult(
                 success=False,
-                error=f"No result file produced. Exit code: {proc.returncode}. stdout_lines: {len(stdout_lines)}",
+                error=f"No result file produced. Exit code: {proc.returncode}. stdout_lines: {stdout_line_count}",
                 turns_used=turns_used,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,

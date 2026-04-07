@@ -122,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Invalid --secret format: {s!r} (expected KEY=VALUE)", file=sys.stderr)
             return 1
         k, v = s.split("=", 1)
+        if k in secrets:
+            print(f"Duplicate --secret key: {k!r} (previous value will be overwritten)", file=sys.stderr)
         secrets[k] = v
 
     try:

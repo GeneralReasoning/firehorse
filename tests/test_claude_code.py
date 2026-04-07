@@ -1,4 +1,7 @@
-"""Tests for firehorse.agents.claude_code helper functions."""
+"""Tests for firehorse.agents.claude_code helper functions.
+
+TODO: Is it possible to add good unit tests for ClaudeCodeAgent.run()
+"""
 from __future__ import annotations
 
 import base64
@@ -341,8 +344,8 @@ class TestSanitizePrompt:
 # ---------------------------------------------------------------------------
 
 class TestSubprocessLineLimit:
-    def test_value_is_10mb(self):
-        assert _SUBPROCESS_LINE_LIMIT == 10 * 1024 * 1024
+    def test_value_is_500kb(self):
+        assert _SUBPROCESS_LINE_LIMIT == 500 * 1024
 
     def test_exceeds_asyncio_default(self):
         assert _SUBPROCESS_LINE_LIMIT > 2**16

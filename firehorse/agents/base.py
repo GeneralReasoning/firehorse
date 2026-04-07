@@ -1,3 +1,13 @@
+"""
+TODO: Use a logger instead of bare print(..., file=sys.stderr) across all agents. 
+
+Ideally we can filter by log level and get more standardised messages
+
+currently we have:
+  - ReAct:              "Tool call error: {e}"
+  - ReSum:              "ERROR: Tool call failed: {e}"
+  - Claude Code/Codex:  "Tool error: {e}" / "Unexpected error: {e}" (from MCP bridge)
+"""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
