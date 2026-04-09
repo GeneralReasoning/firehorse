@@ -40,6 +40,7 @@ class OpenRewardBridge:
         self._session_entered = False
         self._rewards_file: Any = None  # file handle for rewards sidecar
 
+        self._toolset_name: str | None = None
         self.tools: list[ToolSpec] = []
         self.finished = False
         self.last_reward: float | None = None
@@ -55,6 +56,8 @@ class OpenRewardBridge:
         task_spec = json.loads(task_spec_str)
         secrets_str = os.environ.get("OPENREWARD_SESSION_SECRETS", "{}")
         secrets = json.loads(secrets_str) or None
+
+        self._toolset_name = os.environ.get("OPENREWARD_TOOLSET_NAME") or None
 
         self._client = AsyncOpenReward()
         env = self._client.environments.get(env_name)
@@ -83,7 +86,7 @@ class OpenRewardBridge:
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
-                self._session = env.session(task, secrets)
+                self._session = env.session(task, secrets, toolset=self._toolset_name)
                 await self._session.__aenter__()
                 self._session_entered = True
                 all_tools = await self._session.list_tools()
@@ -122,6 +125,11 @@ class OpenRewardBridge:
         print(f"[openreward-bridge] Session created, {len(self.tools)} tools available", file=sys.stderr)
 
     async def _list_tools(self) -> list[Tool]:
+        if self._toolset_name is not None:
+            # Session toolset provides correct descriptions; no manual overrides needed
+            return [toolspec_to_mcp(t) for t in self.tools]
+
+        # Legacy path: manual description overrides when no toolset is used
         variant = os.environ.get("OPENREWARD_TOOL_DESCRIPTIONS", "claude")
         if variant == "claude":
             from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS

@@ -323,8 +323,11 @@ class CodexAgent(BaseAgent):
                 "OPENREWARD_TASK_ENV_NAME": session_task.environment_name,
                 "OPENREWARD_TASK_NAMESPACE": session_task.namespace or "",
                 "OPENREWARD_RESULT_FILE": str(result_file),
-                "OPENREWARD_TOOL_DESCRIPTIONS": "codex" if ctx.use_builtin_descriptions else "env",
             }
+            if ctx.toolset_name:
+                mcp_env["OPENREWARD_TOOLSET_NAME"] = ctx.toolset_name
+            else:
+                mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "codex" if ctx.use_builtin_descriptions else "env"
             if os.environ.get("OPENREWARD_URL"):
                 mcp_env["OPENREWARD_URL"] = os.environ["OPENREWARD_URL"]
             if ctx.secrets:
