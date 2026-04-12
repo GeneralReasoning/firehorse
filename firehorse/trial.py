@@ -37,7 +37,7 @@ async def run_trial(
 
     try:
         session_secrets = config.secrets or None
-        async with env.session(task, secrets=session_secrets) as session:
+        async with env.session(task, secrets=session_secrets, toolset=config.toolset_name) as session:
             prompt_blocks = await session.get_prompt()
             tools = await session.list_tools()
 
@@ -67,6 +67,7 @@ async def run_trial(
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
                 plan_mode=config.plan_mode,
+                toolset_name=config.toolset_name,
                 rollout_client=rollout_client,
             )
 

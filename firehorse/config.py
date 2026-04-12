@@ -25,6 +25,7 @@ class RunConfig:
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
     plan_mode: bool = False
+    toolset_name: str | None = None
 
     def effective_run_name(self) -> str:
         if self.run_name:
@@ -51,3 +52,4 @@ class TrialConfig:
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
     plan_mode: bool = False
+    toolset_name: str | None = None

@@ -30,6 +30,7 @@ class TrialContext:
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False  # Codex: expose all filesystem tools via MCP, not just bash
     plan_mode: bool = False
+    toolset_name: str | None = None  # Built-in toolset name (e.g. "claude-code", "codex")
     rollout_client: Any = None  # AsyncOpenReward, for creating rollouts
     context_window: int | None = None  # Override model's default context window size
 

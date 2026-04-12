@@ -323,8 +323,11 @@ class CodexAgent(BaseAgent):
                 "OPENREWARD_TASK_ENV_NAME": session_task.environment_name,
                 "OPENREWARD_TASK_NAMESPACE": session_task.namespace or "",
                 "OPENREWARD_RESULT_FILE": str(result_file),
-                "OPENREWARD_TOOL_DESCRIPTIONS": "codex" if ctx.use_builtin_descriptions else "env",
             }
+            if ctx.toolset_name:
+                mcp_env["OPENREWARD_TOOLSET_NAME"] = ctx.toolset_name
+            else:
+                mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "codex" if ctx.use_builtin_descriptions else "env"
             if os.environ.get("OPENREWARD_URL"):
                 mcp_env["OPENREWARD_URL"] = os.environ["OPENREWARD_URL"]
             if ctx.secrets:
@@ -461,6 +464,7 @@ class CodexAgent(BaseAgent):
 
             async def read_stdout():
                 nonlocal turns_used, token_info
+                episode_finished = False
                 assert proc.stdout is not None
                 async for line in proc.stdout:
                     line_str = line.decode(errors="replace").strip()
@@ -495,6 +499,20 @@ class CodexAgent(BaseAgent):
                         # Count MCP tool calls and shell commands as turns
                         if msg_type in ("mcp_tool_call_begin", "exec_command_begin"):
                             turns_used += 1
+                        # Detect episode completion from MCP tool result
+                        if msg_type == "mcp_tool_call_end":
+                            result_data_raw = msg.get("result", "")
+                            if isinstance(result_data_raw, dict) and "Ok" in result_data_raw:
+                                result_data_raw = result_data_raw["Ok"]
+                            result_text = _extract_mcp_text(result_data_raw)
+                            if "[EPISODE COMPLETE]" in result_text:
+                                episode_finished = True
+                                print(
+                                    "[codex] Episode finished (env returned is_finished) — terminating",
+                                    file=sys.stderr,
+                                )
+                                proc.kill()
+                                return
 
             async def read_stderr():
                 assert proc.stderr is not None
