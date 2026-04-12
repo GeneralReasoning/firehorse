@@ -501,6 +501,7 @@ class ClaudeCodeAgent(BaseAgent):
 
             async def read_stdout():
                 nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count
+                episode_finished = False
                 assert proc.stdout is not None
                 async for line in proc.stdout:
                     line_str = line.decode(errors="replace").strip()
@@ -568,25 +569,43 @@ class ClaudeCodeAgent(BaseAgent):
                     # Only count successful calls (is_error=False) since the bridge only
                     # increments call_count on success — errors (validation, post-episode)
                     # are returned with isError=True and don't increment.
-                    if event.get("type") == "user" and log_file:
+                    if event.get("type") == "user":
                         msg_content = (event.get("message") or {}).get("content", [])
                         if isinstance(msg_content, list):
                             for block in msg_content:
                                 if isinstance(block, dict) and block.get("type") == "tool_result":
                                     tuid = block.get("tool_use_id", "")
+                                    # Detect episode completion from OR_REWARD tag
+                                    block_content = block.get("content", "")
+                                    if isinstance(block_content, list):
+                                        block_content = "\n".join(
+                                            b.get("text", "") for b in block_content if isinstance(b, dict)
+                                        )
+                                    if "[EPISODE COMPLETE]" in str(block_content):
+                                        episode_finished = True
                                     if tuid not in mcp_tool_use_ids:
                                         continue
                                     is_error = block.get("is_error", False)
                                     if not is_error:
                                         mcp_result_count += 1
-                                    annotation = {
-                                        "type": "openreward_tool_correlation",
-                                        "tool_use_id": tuid,
-                                        "mcp_call_count": mcp_result_count if not is_error else None,
-                                        "tool_name": mcp_tool_use_ids[tuid],
-                                        "is_error": is_error,
-                                    }
-                                    log_file.write(json.dumps(annotation) + "\n")
+                                    if log_file:
+                                        annotation = {
+                                            "type": "openreward_tool_correlation",
+                                            "tool_use_id": tuid,
+                                            "mcp_call_count": mcp_result_count if not is_error else None,
+                                            "tool_name": mcp_tool_use_ids[tuid],
+                                            "is_error": is_error,
+                                        }
+                                        log_file.write(json.dumps(annotation) + "\n")
+
+                    # Terminate subprocess when episode is finished
+                    if episode_finished and event.get("type") == "assistant":
+                        print(
+                            "[claude-code] Episode finished (env returned is_finished) — terminating",
+                            file=sys.stderr,
+                        )
+                        proc.kill()
+                        return
 
             async def read_stderr():
                 assert proc.stderr is not None
