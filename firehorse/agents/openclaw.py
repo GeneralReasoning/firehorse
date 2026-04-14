@@ -30,18 +30,33 @@ _SUBPROCESS_LINE_LIMIT = 10 * 1024 * 1024  # 10 MB
 def _build_openclaw_prompt(
     env_tool_names: list[str],
     mcp_server_name: str = "openreward",
+    sandboxed: bool = False,
 ) -> str:
     """Build MCP tool instructions appended to the user prompt."""
     if not env_tool_names:
         return ""
 
+    if sandboxed:
+        preamble = (
+            "You are solving a task in an OpenReward environment. The environment provides "
+            "tools via an MCP server named 'openreward'. Use these MCP tools instead of "
+            "your built-in exec, process, read, write, edit, and apply_patch tools for "
+            "all file and shell operations. You may still use any of your other built-in "
+            "tools (web_search, browser, web_fetch, etc.) if they are helpful."
+        )
+    else:
+        preamble = (
+            "You are solving a task in an OpenReward environment. The environment provides "
+            "additional tools via an MCP server named 'openreward'. Use your built-in tools "
+            "normally for file operations, terminal commands, web search, etc. The MCP tools "
+            "below are for environment-specific actions (e.g. submitting answers)."
+        )
+
     lines = [
         "",
         "# OpenReward Environment Tools",
         "",
-        "You are solving a task in an OpenReward environment. The environment provides "
-        "tools via an MCP server named 'openreward'. Use these MCP tools for ALL "
-        "environment interactions instead of your built-in tools.",
+        preamble,
         "",
         "Available MCP tools:",
     ]
@@ -261,7 +276,10 @@ class OpenClawAgent(BaseAgent):
             auth_profiles = _build_auth_profiles(oc_provider)
             (agent_dir / "auth-profiles.json").write_text(json.dumps(auth_profiles, indent=2))
 
-            openclaw_config = {
+            # Determine if we're running in sandboxed mode
+            sandboxed = ctx.toolset_name == "openclaw-sandboxed"
+
+            openclaw_config: dict[str, Any] = {
                 "agents": {
                     "defaults": {
                         "model": oc_model,
@@ -288,16 +306,17 @@ class OpenClawAgent(BaseAgent):
                         }
                     }
                 },
-                "tools": {
-                    # Deny built-in filesystem/shell tools — use MCP equivalents
-                    "deny": ["group:runtime", "group:fs"],
-                },
             }
+            if sandboxed:
+                # Deny built-in filesystem/shell tools — use MCP equivalents
+                openclaw_config["tools"] = {
+                    "deny": ["group:runtime", "group:fs"],
+                }
             config_path = openclaw_dir / "openclaw.json"
             config_path.write_text(json.dumps(openclaw_config, indent=2))
 
             # Build prompt
-            mcp_section = _build_openclaw_prompt(env_tool_names)
+            mcp_section = _build_openclaw_prompt(env_tool_names, sandboxed=sandboxed)
             termination = (
                 "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
                 "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE]."

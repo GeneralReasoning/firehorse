@@ -58,7 +58,9 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
     env = client.environments.get(config.env)
 
     # List tasks
+    print(f"Listing tasks for {config.env} ({config.split} split)...", file=sys.stderr)
     tasks = await env.list_tasks(config.split)
+    print(f"Found {len(tasks)} tasks", file=sys.stderr)
     if config.skip_tasks:
         tasks = tasks[config.skip_tasks:]
     if config.max_tasks is not None:
@@ -146,7 +148,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
                 plan_mode=config.plan_mode,
-                toolset_name=config.toolset_name or (config.agent if config.agent in ("claude-code", "codex", "openclaw", "hermes") else None),
+                toolset_name=config.toolset_name or (config.agent if config.agent in ("claude-code", "codex") else None),
             )
             result = await run_trial(
                 env, task, agent, trial_config,

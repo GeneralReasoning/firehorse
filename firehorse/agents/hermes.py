@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -30,19 +31,33 @@ _SUBPROCESS_LINE_LIMIT = 10 * 1024 * 1024  # 10 MB
 def _build_hermes_prompt(
     env_tool_names: list[str],
     mcp_server_name: str = "openreward",
+    sandboxed: bool = False,
 ) -> str:
     """Build MCP tool instructions appended to the user prompt."""
     if not env_tool_names:
         return ""
 
+    if sandboxed:
+        preamble = (
+            "You are solving a task in an OpenReward environment. The environment provides "
+            "tools via an MCP server named 'openreward'. Use these MCP tools instead of "
+            "your built-in terminal, read_file, write_file, search_files, and patch tools "
+            "for all file and shell operations. You may still use any of your other "
+            "built-in tools (web_search, browser, vision, memory, etc.) if they are helpful."
+        )
+    else:
+        preamble = (
+            "You are solving a task in an OpenReward environment. The environment provides "
+            "additional tools via an MCP server named 'openreward'. Use your built-in tools "
+            "normally for file operations, terminal commands, web search, etc. The MCP tools "
+            "below are for environment-specific actions (e.g. submitting answers)."
+        )
+
     lines = [
         "",
         "# OpenReward Environment Tools",
         "",
-        "You are solving a task in an OpenReward environment. The environment provides "
-        "tools via an MCP server named 'openreward'. Use these MCP tools for ALL "
-        "environment interactions instead of your built-in terminal, read_file, "
-        "write_file, and patch tools.",
+        preamble,
         "",
         "Available MCP tools:",
     ]
@@ -104,69 +119,207 @@ def _resolve_model_hermes(
     return model, None
 
 
-def _log_hermes_event_to_rollout(event: dict, rollout: Any) -> None:
-    """Parse a Hermes JSONL event and log it to an OpenReward rollout."""
+
+def _extract_session_id(stdout_lines: list[str]) -> str | None:
+    """Extract the Hermes session ID from stdout.
+
+    Hermes prints ``session_id: <id>`` in quiet mode and
+    ``Session:        <id>`` in interactive mode.
+    """
+    for line in reversed(stdout_lines):
+        # Quiet mode: "session_id: 20260414_233015_3f22d1"
+        m = re.match(r'\s*session_id:\s+(\S+)', line)
+        if m:
+            return m.group(1)
+        # Interactive mode: "Session:        <id>"
+        m = re.match(r'\s*Session:\s+(\S+)', line)
+        if m:
+            return m.group(1)
+    return None
+
+
+async def _export_hermes_session(
+    session_id: str,
+    hermes_home: Path,
+) -> dict | None:
+    """Run ``hermes sessions export --session-id <id> -`` and return parsed data."""
+    proc = await asyncio.create_subprocess_exec(
+        "hermes", "sessions", "export", "--session-id", session_id, "-",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "HERMES_HOME": str(hermes_home)},
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        print(f"[hermes] session export failed (rc={proc.returncode}): {stderr.decode()[:500]}", file=sys.stderr)
+        return None
+
+    # The export is a single JSON line containing the session + messages
+    raw = stdout.decode().strip()
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Might be multiple JSONL lines; take the first
+        first_line = raw.splitlines()[0]
+        try:
+            return json.loads(first_line)
+        except json.JSONDecodeError:
+            return None
+
+
+def _log_hermes_from_export(
+    session_data: dict,
+    toolcalls_path: Path,
+    rollout: Any,
+) -> None:
+    """Log structured rollout from a Hermes session export.
+
+    The export contains a ``messages`` list with role/content/tool_calls/
+    tool_call_id/tool_name/reasoning fields — proper structured data.
+    We use the sidecar toolcalls JSONL for reward/finished info.
+    """
     from openreward import AssistantMessage, ToolCall, ToolResult
 
-    event_type = event.get("type", "")
+    messages = session_data.get("messages", [])
 
-    if event_type in ("assistant", "message", "agent_message"):
-        text = event.get("text", event.get("content", event.get("message", "")))
-        if isinstance(text, str) and text:
+    # Build a lookup of sidecar events by tool name + call_id for reward info
+    sidecar_events: list[dict] = []
+    if toolcalls_path.exists():
+        try:
+            for line in toolcalls_path.read_text().strip().splitlines():
+                sidecar_events.append(json.loads(line))
+        except Exception:
+            pass
+    sidecar_idx = 0
+
+    for msg in messages:
+        role = msg.get("role", "")
+
+        if role == "assistant":
+            # Log reasoning if present
+            reasoning = msg.get("reasoning") or ""
+            content = msg.get("content") or ""
+
+            if reasoning:
+                try:
+                    rollout.log(AssistantMessage(content=f"<thinking>\n{reasoning[:10000]}\n</thinking>"))
+                except Exception:
+                    pass
+
+            if content:
+                try:
+                    rollout.log(AssistantMessage(content=content[:10000]))
+                except Exception:
+                    pass
+
+            # Log tool calls embedded in the assistant message
+            # Hermes DB stores tool_calls as [{"name": ..., "arguments": ...}]
+            tool_calls = msg.get("tool_calls") or []
+            for tc in tool_calls:
+                fn = tc.get("function", tc)
+                call_id = tc.get("id", "")
+                name = fn.get("name", "")
+                args = fn.get("arguments", "")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        pass
+                try:
+                    rollout.log(ToolCall(
+                        name=name,
+                        content=json.dumps(args) if isinstance(args, dict) else str(args),
+                        call_id=call_id,
+                    ))
+                except Exception:
+                    pass
+
+        elif role == "tool":
+            content = msg.get("content") or ""
+            call_id = msg.get("tool_call_id") or ""
+            content_str = str(content)[:10000]
+
+            # Try to match with sidecar for reward/finished
+            reward = None
+            is_finished = False
+
+            # Check sidecar
+            if sidecar_idx < len(sidecar_events):
+                se = sidecar_events[sidecar_idx]
+                reward = se.get("reward")
+                is_finished = se.get("finished", False)
+                sidecar_idx += 1
+            else:
+                # Fallback: parse [OR_REWARD] from content
+                m = re.search(r'\[OR_REWARD:(\{[^}]+\})\]', content_str)
+                if m:
+                    try:
+                        rd = json.loads(m.group(1))
+                        reward = rd.get("r")
+                        is_finished = rd.get("f", False)
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
             try:
-                rollout.log(AssistantMessage(content=text))
+                rollout.log(
+                    ToolResult(content=content_str, call_id=call_id),
+                    reward=reward,
+                    is_finished=is_finished,
+                )
             except Exception:
                 pass
 
-    elif event_type in ("tool_use", "tool_call", "mcp_tool_call_begin"):
-        try:
-            rollout.log(ToolCall(
-                name=event.get("name", event.get("tool", "")),
-                content=json.dumps(event.get("input", event.get("args", {}))),
-                call_id=event.get("id", event.get("call_id", "")),
-            ))
-        except Exception:
-            pass
-
-    elif event_type in ("tool_result", "mcp_tool_call_end"):
-        content = event.get("output", event.get("result", event.get("content", "")))
-        if isinstance(content, list):
-            content = "\n".join(
-                b.get("text", "") for b in content if isinstance(b, dict)
-            )
-        try:
-            rollout.log(ToolResult(
-                content=str(content)[:10000],
-                call_id=event.get("id", event.get("call_id", "")),
-            ))
-        except Exception:
+        elif role == "user":
+            # Skip user messages — already logged the prompt
             pass
 
 
-def _log_toolcalls_to_rollout(toolcalls_path: Path, rollout: Any) -> None:
-    """Read the bridge's tool-call log and log each call+result to the rollout."""
+def _log_hermes_rollout_fallback(
+    toolcalls_path: Path,
+    rollout: Any,
+) -> None:
+    """Fallback rollout logging using only the sidecar toolcalls JSONL.
+
+    Used when session export is unavailable. Logs tool calls/results
+    with rewards but no assistant reasoning.
+    """
+    from openreward import ToolCall, ToolResult
+
     if not toolcalls_path.exists():
         return
-    from openreward import ToolCall, ToolResult
+
     try:
-        for line in toolcalls_path.read_text().strip().splitlines():
+        lines = toolcalls_path.read_text().strip().splitlines()
+    except Exception:
+        return
+
+    for line in lines:
+        try:
             event = json.loads(line)
-            call_id = event.get("call_id", "")
+        except json.JSONDecodeError:
+            continue
+        call_id = event.get("call_id", "")
+        try:
             rollout.log(ToolCall(
                 name=event.get("tool", ""),
                 content=json.dumps(event.get("arguments", {})),
                 call_id=call_id,
             ))
-            result_content = event.get("result", "")
-            reward = event.get("reward")
-            finished = event.get("finished", False)
+        except Exception:
+            pass
+        try:
             rollout.log(
-                ToolResult(content=result_content, call_id=call_id),
-                reward=reward,
-                is_finished=finished,
+                ToolResult(
+                    content=event.get("result", ""),
+                    call_id=call_id,
+                ),
+                reward=event.get("reward"),
+                is_finished=event.get("finished", False),
             )
-    except Exception:
-        pass
+        except Exception:
+            pass
 
 
 class HermesAgent(BaseAgent):
@@ -245,8 +398,11 @@ class HermesAgent(BaseAgent):
             hermes_home.mkdir()
             (hermes_home / "sessions").mkdir()
 
-            # Hermes config.yaml with MCP server and disabled built-in toolsets
-            hermes_config = {
+            # Determine if we're running in sandboxed mode
+            sandboxed = ctx.toolset_name == "hermes-sandboxed"
+
+            # Hermes config.yaml with MCP server
+            hermes_config: dict[str, Any] = {
                 "mcp_servers": {
                     "openreward": {
                         "command": sys.executable,
@@ -255,9 +411,10 @@ class HermesAgent(BaseAgent):
                         "enabled": True,
                     }
                 },
-                # Disable built-in terminal/file tools — use MCP equivalents
-                "disabled_toolsets": ["terminal", "file_operations"],
             }
+            if sandboxed:
+                # Disable built-in terminal/file tools — use MCP equivalents
+                hermes_config["disabled_toolsets"] = ["terminal", "file"]
             config_path = hermes_home / "config.yaml"
             # YAML is a superset of JSON, so JSON content works in a .yaml file
             config_path.write_text(json.dumps(hermes_config, indent=2))
@@ -266,7 +423,7 @@ class HermesAgent(BaseAgent):
             model_name, provider = _resolve_model_hermes(ctx.model, ctx.provider_url)
 
             # Build prompt
-            mcp_section = _build_hermes_prompt(env_tool_names)
+            mcp_section = _build_hermes_prompt(env_tool_names, sandboxed=sandboxed)
             termination = (
                 "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
                 "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE]."
@@ -286,6 +443,7 @@ class HermesAgent(BaseAgent):
                 "-Q",  # Quiet/programmatic mode
                 "--model", model_name,
                 "--yolo",  # Skip approval prompts
+                "--pass-session-id",  # Emit session ID so we can export structured data
             ]
 
             if provider:
@@ -385,9 +543,7 @@ class HermesAgent(BaseAgent):
                         tool_name = event.get("name", event.get("tool", ""))
                         print(f"  [hermes] tool_result: {tool_name}", file=sys.stderr)
 
-                    # Log to rollout
-                    if main_rollout:
-                        _log_hermes_event_to_rollout(event, main_rollout)
+                    # Rollout logging happens post-hoc via session export
 
             async def read_stderr():
                 assert proc.stderr is not None
@@ -418,17 +574,20 @@ class HermesAgent(BaseAgent):
                 except json.JSONDecodeError:
                     pass
 
-            # Log tool calls from bridge sidecar, then assistant text
+            # Export structured session data for rollout logging.
             if main_rollout:
-                _log_toolcalls_to_rollout(toolcalls_path, main_rollout)
-                if stdout_lines:
-                    from openreward import AssistantMessage
-                    combined = "\n".join(stdout_lines)
-                    if combined.strip():
-                        try:
-                            main_rollout.log(AssistantMessage(content=combined[:10000]))
-                        except Exception:
-                            pass
+                session_id = _extract_session_id(stdout_lines)
+                if session_id:
+                    print(f"[hermes] Exporting session {session_id} for rollout", file=sys.stderr)
+                    session_data = await _export_hermes_session(session_id, hermes_home)
+                    if session_data:
+                        _log_hermes_from_export(session_data, toolcalls_path, main_rollout)
+                    else:
+                        print("[hermes] Session export failed, falling back to sidecar", file=sys.stderr)
+                        _log_hermes_rollout_fallback(toolcalls_path, main_rollout)
+                else:
+                    print("[hermes] No session ID found in stdout, falling back to sidecar", file=sys.stderr)
+                    _log_hermes_rollout_fallback(toolcalls_path, main_rollout)
 
             if main_log:
                 summary_event = {
