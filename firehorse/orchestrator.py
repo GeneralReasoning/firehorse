@@ -176,6 +176,10 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
         return_exceptions=True,
     )
 
+    # Flush pending rollout uploads before the event loop shuts down.
+    if config.logging:
+        client.rollout.close()
+
     summary = RunSummary.from_results(
         results,
         run_name=run_name,

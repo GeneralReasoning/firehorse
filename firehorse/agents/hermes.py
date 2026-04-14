@@ -104,6 +104,71 @@ def _resolve_model_hermes(
     return model, None
 
 
+def _log_hermes_event_to_rollout(event: dict, rollout: Any) -> None:
+    """Parse a Hermes JSONL event and log it to an OpenReward rollout."""
+    from openreward import AssistantMessage, ToolCall, ToolResult
+
+    event_type = event.get("type", "")
+
+    if event_type in ("assistant", "message", "agent_message"):
+        text = event.get("text", event.get("content", event.get("message", "")))
+        if isinstance(text, str) and text:
+            try:
+                rollout.log(AssistantMessage(content=text))
+            except Exception:
+                pass
+
+    elif event_type in ("tool_use", "tool_call", "mcp_tool_call_begin"):
+        try:
+            rollout.log(ToolCall(
+                name=event.get("name", event.get("tool", "")),
+                content=json.dumps(event.get("input", event.get("args", {}))),
+                call_id=event.get("id", event.get("call_id", "")),
+            ))
+        except Exception:
+            pass
+
+    elif event_type in ("tool_result", "mcp_tool_call_end"):
+        content = event.get("output", event.get("result", event.get("content", "")))
+        if isinstance(content, list):
+            content = "\n".join(
+                b.get("text", "") for b in content if isinstance(b, dict)
+            )
+        try:
+            rollout.log(ToolResult(
+                content=str(content)[:10000],
+                call_id=event.get("id", event.get("call_id", "")),
+            ))
+        except Exception:
+            pass
+
+
+def _log_toolcalls_to_rollout(toolcalls_path: Path, rollout: Any) -> None:
+    """Read the bridge's tool-call log and log each call+result to the rollout."""
+    if not toolcalls_path.exists():
+        return
+    from openreward import ToolCall, ToolResult
+    try:
+        for line in toolcalls_path.read_text().strip().splitlines():
+            event = json.loads(line)
+            call_id = event.get("call_id", "")
+            rollout.log(ToolCall(
+                name=event.get("tool", ""),
+                content=json.dumps(event.get("arguments", {})),
+                call_id=call_id,
+            ))
+            result_content = event.get("result", "")
+            reward = event.get("reward")
+            finished = event.get("finished", False)
+            rollout.log(
+                ToolResult(content=result_content, call_id=call_id),
+                reward=reward,
+                is_finished=finished,
+            )
+    except Exception:
+        pass
+
+
 class HermesAgent(BaseAgent):
 
     @property
@@ -164,6 +229,10 @@ class HermesAgent(BaseAgent):
             if log_dir:
                 rewards_path = log_dir / f"trial_{trial_id}_rewards.jsonl"
                 mcp_env["OPENREWARD_REWARDS_FILE"] = str(rewards_path)
+
+            # Tool-call log for rollout reconstruction
+            toolcalls_path = tmppath / "toolcalls.jsonl"
+            mcp_env["OPENREWARD_TOOLCALLS_FILE"] = str(toolcalls_path)
 
             # Exclude env tools that duplicate the agent's built-in planning tools
             exclude_tools = [n for n in env_tool_names if n.lower() in ALWAYS_USE_BUILTIN]
@@ -297,12 +366,28 @@ class HermesAgent(BaseAgent):
                     try:
                         event = json.loads(line_str)
                     except json.JSONDecodeError:
+                        # Hermes in quiet mode outputs plain text
+                        print(f"  [hermes] {line_str[:200]}", file=sys.stderr)
                         continue
 
-                    # Count tool uses
+                    # Print live progress
                     event_type = event.get("type", "")
                     if event_type in ("tool_use", "tool_call", "mcp_tool_call_begin"):
                         turns_used += 1
+                        tool_name = event.get("name", event.get("tool", ""))
+                        print(f"  [hermes] tool_call: {tool_name}", file=sys.stderr)
+                    elif event_type in ("assistant", "message", "agent_message"):
+                        text = event.get("text", event.get("content", event.get("message", "")))
+                        if isinstance(text, str) and text:
+                            preview = text[:150].replace("\n", " ")
+                            print(f"  [hermes] {preview}", file=sys.stderr)
+                    elif event_type in ("tool_result", "mcp_tool_call_end"):
+                        tool_name = event.get("name", event.get("tool", ""))
+                        print(f"  [hermes] tool_result: {tool_name}", file=sys.stderr)
+
+                    # Log to rollout
+                    if main_rollout:
+                        _log_hermes_event_to_rollout(event, main_rollout)
 
             async def read_stderr():
                 assert proc.stderr is not None
@@ -323,50 +408,62 @@ class HermesAgent(BaseAgent):
                     proc.kill()
                     await proc.wait()
                 return AgentResult(success=False, error=str(e))
-            finally:
-                duration_ms = int((time.monotonic() - start_time) * 1000)
 
-                result_data = None
-                if result_file.exists():
-                    try:
-                        result_data = json.loads(result_file.read_text())
-                    except json.JSONDecodeError:
-                        pass
+            duration_ms = int((time.monotonic() - start_time) * 1000)
 
-                if main_log:
-                    summary_event = {
-                        "type": "openreward_summary",
-                        "task_spec": ctx.task_spec,
-                        "env": ctx.env_name,
-                        "model": ctx.model,
-                        "bridge_result": result_data,
-                        "usage": {"duration_ms": duration_ms},
-                    }
-                    main_log.write(json.dumps(summary_event) + "\n")
-                    main_log.close()
+            result_data = None
+            if result_file.exists():
+                try:
+                    result_data = json.loads(result_file.read_text())
+                except json.JSONDecodeError:
+                    pass
 
-                # Write per-trial result.json
-                if log_dir:
-                    trial_result = {
-                        "task_id": trial_id,
-                        "task_spec": ctx.task_spec,
-                        "environment": ctx.env_name,
-                        "agent": "hermes",
-                        "model": ctx.model,
-                        "split": ctx.split,
-                        "final_reward": result_data.get("last_reward") if result_data else None,
-                        "finished": result_data.get("finished", False) if result_data else False,
-                        "total_reward": result_data.get("total_reward") if result_data else None,
-                        "tool_calls": result_data.get("calls") if result_data else turns_used,
-                        "duration_seconds": duration_ms / 1000,
-                        "error": None,
-                        "rollout_url": (
-                            f"https://openreward.ai/rollout/{main_rollout.event_id}"
-                            if main_rollout else None
-                        ),
-                    }
-                    result_json_path = log_dir / f"trial_{trial_id}_result.json"
-                    result_json_path.write_text(json.dumps(trial_result, indent=2))
+            # Log tool calls from bridge sidecar, then assistant text
+            if main_rollout:
+                _log_toolcalls_to_rollout(toolcalls_path, main_rollout)
+                if stdout_lines:
+                    from openreward import AssistantMessage
+                    combined = "\n".join(stdout_lines)
+                    if combined.strip():
+                        try:
+                            main_rollout.log(AssistantMessage(content=combined[:10000]))
+                        except Exception:
+                            pass
+
+            if main_log:
+                summary_event = {
+                    "type": "openreward_summary",
+                    "task_spec": ctx.task_spec,
+                    "env": ctx.env_name,
+                    "model": ctx.model,
+                    "bridge_result": result_data,
+                    "usage": {"duration_ms": duration_ms},
+                }
+                main_log.write(json.dumps(summary_event) + "\n")
+                main_log.close()
+
+            # Write per-trial result.json
+            if log_dir:
+                trial_result = {
+                    "task_id": trial_id,
+                    "task_spec": ctx.task_spec,
+                    "environment": ctx.env_name,
+                    "agent": "hermes",
+                    "model": ctx.model,
+                    "split": ctx.split,
+                    "final_reward": result_data.get("last_reward") if result_data else None,
+                    "finished": result_data.get("finished", False) if result_data else False,
+                    "total_reward": result_data.get("total_reward") if result_data else None,
+                    "tool_calls": result_data.get("calls") if result_data else turns_used,
+                    "duration_seconds": duration_ms / 1000,
+                    "error": None,
+                    "rollout_url": (
+                        f"https://openreward.ai/rollout/{main_rollout.event_id}"
+                        if main_rollout else None
+                    ),
+                }
+                result_json_path = log_dir / f"trial_{trial_id}_result.json"
+                result_json_path.write_text(json.dumps(trial_result, indent=2))
 
             # Build AgentResult
             if result_data is not None:

@@ -90,6 +90,91 @@ def _sanitize_prompt(text: str) -> str:
     return text
 
 
+def _resolve_openclaw_model(model: str) -> tuple[str, str]:
+    """Split 'provider/model-name' into (provider, model_name).
+
+    OpenClaw uses provider/model format natively (e.g. "anthropic/claude-sonnet-4-6").
+    """
+    if "/" in model:
+        provider, model_name = model.split("/", 1)
+        return provider, model_name
+    return "openai", model
+
+
+# Map provider names to the env var that holds their API key.
+_PROVIDER_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _build_auth_profiles(provider: str) -> dict:
+    """Build an OpenClaw auth-profiles.json with the API key for the given provider."""
+    env_var = _PROVIDER_KEY_ENV.get(provider)
+    api_key = os.environ.get(env_var, "") if env_var else ""
+    if not api_key:
+        # Try common fallbacks
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+
+    return {
+        "version": 1,
+        "profiles": {
+            "default": {
+                "type": "api_key",
+                "provider": provider,
+                "key": api_key,
+            }
+        },
+    }
+
+
+def _log_toolcalls_to_rollout(toolcalls_path: Path, rollout: Any) -> None:
+    """Read the bridge's tool-call log and log each call+result to the rollout."""
+    if not toolcalls_path.exists():
+        return
+    from openreward import ToolCall, ToolResult
+    try:
+        for line in toolcalls_path.read_text().strip().splitlines():
+            event = json.loads(line)
+            call_id = event.get("call_id", "")
+            rollout.log(ToolCall(
+                name=event.get("tool", ""),
+                content=json.dumps(event.get("arguments", {})),
+                call_id=call_id,
+            ))
+            result_content = event.get("result", "")
+            reward = event.get("reward")
+            finished = event.get("finished", False)
+            rollout.log(
+                ToolResult(content=result_content, call_id=call_id),
+                reward=reward,
+                is_finished=finished,
+            )
+    except Exception:
+        pass
+
+
+def _log_openclaw_output_to_rollout(output: dict, rollout: Any) -> None:
+    """Parse OpenClaw's JSON output and log the assistant response to the rollout.
+
+    OpenClaw ``--json`` output is: ``{"payloads": [{"text": "..."}], "meta": {...}}``.
+    """
+    from openreward import AssistantMessage
+
+    payloads = output.get("payloads", [])
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        text = payload.get("text", "")
+        if text:
+            try:
+                rollout.log(AssistantMessage(content=text))
+            except Exception:
+                pass
+
+
 class OpenClawAgent(BaseAgent):
 
     @property
@@ -150,16 +235,49 @@ class OpenClawAgent(BaseAgent):
                 rewards_path = log_dir / f"trial_{trial_id}_rewards.jsonl"
                 mcp_env["OPENREWARD_REWARDS_FILE"] = str(rewards_path)
 
+            # Tool-call log for rollout reconstruction
+            toolcalls_path = tmppath / "toolcalls.jsonl"
+            mcp_env["OPENREWARD_TOOLCALLS_FILE"] = str(toolcalls_path)
+
             # Exclude env tools that duplicate the agent's built-in planning tools
             exclude_tools = [n for n in env_tool_names if n.lower() in ALWAYS_USE_BUILTIN]
             if exclude_tools:
                 mcp_env["OPENREWARD_EXCLUDE_TOOLS"] = ",".join(exclude_tools)
 
+            # Resolve model: OpenClaw uses "provider/model" format natively
+            oc_model = ctx.model  # e.g. "anthropic/claude-sonnet-4-6"
+            oc_provider, oc_model_name = _resolve_openclaw_model(ctx.model)
+
             # Write OpenClaw config with MCP server to temp directory.
-            # OpenClaw reads config from OPENCLAW_HOME or ~/.openclaw.
-            openclaw_home = tmppath / ".openclaw"
-            openclaw_home.mkdir()
+            # OpenClaw reads config from $OPENCLAW_HOME/.openclaw/openclaw.json.
+            # We set OPENCLAW_HOME=tmppath so config lives at tmppath/.openclaw/openclaw.json.
+            openclaw_dir = tmppath / ".openclaw"
+            openclaw_dir.mkdir()
+
+            # Write auth profile so OpenClaw can authenticate with the provider.
+            # Auth profiles live at .openclaw/agents/main/agent/auth-profiles.json.
+            agent_dir = openclaw_dir / "agents" / "main" / "agent"
+            agent_dir.mkdir(parents=True)
+            auth_profiles = _build_auth_profiles(oc_provider)
+            (agent_dir / "auth-profiles.json").write_text(json.dumps(auth_profiles, indent=2))
+
             openclaw_config = {
+                "agents": {
+                    "defaults": {
+                        "model": oc_model,
+                    }
+                },
+                "auth": {
+                    "profiles": {
+                        "default": {
+                            "provider": oc_provider,
+                            "mode": "api_key",
+                        }
+                    },
+                    "order": {
+                        oc_provider: ["default"],
+                    },
+                },
                 "mcp": {
                     "servers": {
                         "openreward": {
@@ -175,7 +293,7 @@ class OpenClawAgent(BaseAgent):
                     "deny": ["group:runtime", "group:fs"],
                 },
             }
-            config_path = openclaw_home / "config.json"
+            config_path = openclaw_dir / "openclaw.json"
             config_path.write_text(json.dumps(openclaw_config, indent=2))
 
             # Build prompt
@@ -197,12 +315,13 @@ class OpenClawAgent(BaseAgent):
                 "openclaw", "agent",
                 "--local",
                 "--json",
+                "--session-id", f"orwd-{trial_id}",
                 "-m", full_prompt,
             ]
 
             proc_env = {
                 **os.environ,
-                "OPENCLAW_HOME": str(openclaw_home),
+                "OPENCLAW_HOME": str(tmppath),
             }
 
             print(f"[openclaw] Launching with config at {config_path}", file=sys.stderr)
@@ -256,39 +375,44 @@ class OpenClawAgent(BaseAgent):
                     pass
 
             # --- Read stdout and stderr concurrently ---
+            # OpenClaw outputs its JSON result to stderr (via runtime.log),
+            # mixed with other log lines. We collect both streams.
             turns_used = 0
-            stdout_lines: list[str] = []
+            stdout_chunks: list[bytes] = []
+            stderr_lines: list[str] = []
 
             async def read_stdout():
-                nonlocal turns_used
                 assert proc.stdout is not None
-                async for line in proc.stdout:
-                    line_str = line.decode(errors="replace").strip()
-                    if not line_str:
-                        continue
-                    stdout_lines.append(line_str)
-                    if main_log:
-                        main_log.write(line_str + "\n")
-                    try:
-                        event = json.loads(line_str)
-                    except json.JSONDecodeError:
-                        continue
+                while True:
+                    chunk = await proc.stdout.read(65536)
+                    if not chunk:
+                        break
+                    stdout_chunks.append(chunk)
 
-                    # Count tool uses
-                    event_type = event.get("type", "")
-                    if event_type in ("tool_use", "tool_call"):
-                        turns_used += 1
+            # Strip ANSI escape codes for cleaner log parsing.
+            _ANSI_RE = __import__("re").compile(r"\x1b\[[0-9;]*m")
 
             async def read_stderr():
+                nonlocal turns_used
                 assert proc.stderr is not None
                 async for line in proc.stderr:
                     line_str = line.decode(errors="replace").strip()
-                    if line_str and (
-                        "[openreward-bridge]" in line_str
-                        or "Error" in line_str
-                        or "error" in line_str
-                    ):
-                        print(f"  {line_str}", file=sys.stderr)
+                    if not line_str:
+                        continue
+                    clean = _ANSI_RE.sub("", line_str)
+                    stderr_lines.append(clean)
+                    # Show MCP bridge messages, errors, and tool-call progress
+                    if "[openreward-bridge]" in clean:
+                        print(f"  {clean}", file=sys.stderr)
+                    elif "tool_call" in clean.lower() or "mcp" in clean.lower():
+                        turns_used += 1
+                        print(f"  [openclaw] {clean[:200]}", file=sys.stderr)
+                    elif "Error" in clean or "error" in clean or "FailoverError" in clean:
+                        print(f"  [openclaw] {clean[:300]}", file=sys.stderr)
+                    elif "[diagnostic]" in clean and "lane" in clean:
+                        pass  # too noisy
+                    elif "[model-fallback" in clean or "[agent/embedded]" in clean:
+                        pass  # noisy
 
             try:
                 await asyncio.gather(read_stdout(), read_stderr())
@@ -298,50 +422,99 @@ class OpenClawAgent(BaseAgent):
                     proc.kill()
                     await proc.wait()
                 return AgentResult(success=False, error=str(e))
-            finally:
-                duration_ms = int((time.monotonic() - start_time) * 1000)
 
-                result_data = None
-                if result_file.exists():
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+
+            # Parse OpenClaw's JSON output.
+            # OpenClaw outputs pretty-printed JSON to stderr (via console.log).
+            stdout_raw = b"".join(stdout_chunks).decode(errors="replace").strip()
+            openclaw_output = None
+            if stdout_raw:
+                try:
+                    openclaw_output = json.loads(stdout_raw)
+                except json.JSONDecodeError:
+                    pass
+
+            if openclaw_output is None and stderr_lines:
+                # Find the '{' line before '"payloads"', collect until braces balance.
+                json_start = None
+                for i, line in enumerate(stderr_lines):
+                    if '"payloads"' in line:
+                        for j in range(i - 1, max(i - 3, -1), -1):
+                            if stderr_lines[j].strip() == '{':
+                                json_start = j
+                                break
+                        if json_start is None and line.strip().startswith('{'):
+                            json_start = i
+                        break
+                if json_start is not None:
+                    depth = 0
+                    json_lines = []
+                    for k in range(json_start, len(stderr_lines)):
+                        json_lines.append(stderr_lines[k])
+                        depth += stderr_lines[k].count('{') - stderr_lines[k].count('}')
+                        if depth <= 0:
+                            break
                     try:
-                        result_data = json.loads(result_file.read_text())
+                        openclaw_output = json.loads("\n".join(json_lines))
                     except json.JSONDecodeError:
                         pass
 
-                if main_log:
-                    summary_event = {
-                        "type": "openreward_summary",
-                        "task_spec": ctx.task_spec,
-                        "env": ctx.env_name,
-                        "model": ctx.model,
-                        "bridge_result": result_data,
-                        "usage": {"duration_ms": duration_ms},
-                    }
-                    main_log.write(json.dumps(summary_event) + "\n")
-                    main_log.close()
+            if openclaw_output:
+                print(f"[openclaw] Captured agent output ({len(openclaw_output.get('payloads', []))} payloads)", file=sys.stderr)
+            else:
+                print(f"[openclaw] No agent output captured (stdout={len(stdout_raw)}b, stderr={len(stderr_lines)} lines)", file=sys.stderr)
 
-                # Write per-trial result.json
-                if log_dir:
-                    trial_result = {
-                        "task_id": trial_id,
-                        "task_spec": ctx.task_spec,
-                        "environment": ctx.env_name,
-                        "agent": "openclaw",
-                        "model": ctx.model,
-                        "split": ctx.split,
-                        "final_reward": result_data.get("last_reward") if result_data else None,
-                        "finished": result_data.get("finished", False) if result_data else False,
-                        "total_reward": result_data.get("total_reward") if result_data else None,
-                        "tool_calls": result_data.get("calls") if result_data else turns_used,
-                        "duration_seconds": duration_ms / 1000,
-                        "error": None,
-                        "rollout_url": (
-                            f"https://openreward.ai/rollout/{main_rollout.event_id}"
-                            if main_rollout else None
-                        ),
-                    }
-                    result_json_path = log_dir / f"trial_{trial_id}_result.json"
-                    result_json_path.write_text(json.dumps(trial_result, indent=2))
+            result_data = None
+            if result_file.exists():
+                try:
+                    result_data = json.loads(result_file.read_text())
+                except json.JSONDecodeError:
+                    pass
+
+            # Log tool calls and assistant response to rollout (before shutdown)
+            if main_rollout:
+                _log_toolcalls_to_rollout(toolcalls_path, main_rollout)
+                if openclaw_output:
+                    _log_openclaw_output_to_rollout(openclaw_output, main_rollout)
+
+            # Log to JSONL
+            if main_log:
+                if openclaw_output:
+                    main_log.write(json.dumps({"type": "openclaw_output", **openclaw_output}) + "\n")
+                summary_event = {
+                    "type": "openreward_summary",
+                    "task_spec": ctx.task_spec,
+                    "env": ctx.env_name,
+                    "model": ctx.model,
+                    "bridge_result": result_data,
+                    "usage": {"duration_ms": duration_ms},
+                }
+                main_log.write(json.dumps(summary_event) + "\n")
+                main_log.close()
+
+            # Write per-trial result.json
+            if log_dir:
+                trial_result = {
+                    "task_id": trial_id,
+                    "task_spec": ctx.task_spec,
+                    "environment": ctx.env_name,
+                    "agent": "openclaw",
+                    "model": ctx.model,
+                    "split": ctx.split,
+                    "final_reward": result_data.get("last_reward") if result_data else None,
+                    "finished": result_data.get("finished", False) if result_data else False,
+                    "total_reward": result_data.get("total_reward") if result_data else None,
+                    "tool_calls": result_data.get("calls") if result_data else turns_used,
+                    "duration_seconds": duration_ms / 1000,
+                    "error": None,
+                    "rollout_url": (
+                        f"https://openreward.ai/rollout/{main_rollout.event_id}"
+                        if main_rollout else None
+                    ),
+                }
+                result_json_path = log_dir / f"trial_{trial_id}_result.json"
+                result_json_path.write_text(json.dumps(trial_result, indent=2))
 
             # Build AgentResult
             if result_data is not None:
@@ -354,14 +527,12 @@ class OpenClawAgent(BaseAgent):
                     duration_ms=duration_ms,
                 )
 
-            if stdout_lines:
-                print(f"[openclaw] stdout ({len(stdout_lines)} lines), last 3:", file=sys.stderr)
-                for line in stdout_lines[-3:]:
-                    print(f"  {line[:300]}", file=sys.stderr)
+            if stdout_raw:
+                print(f"[openclaw] stdout: {stdout_raw[:500]}", file=sys.stderr)
 
             return AgentResult(
                 success=False,
-                error=f"No result file produced. Exit code: {proc.returncode}. stdout_lines: {len(stdout_lines)}",
+                error=f"No result file produced. Exit code: {proc.returncode}.",
                 turns_used=turns_used,
                 duration_ms=duration_ms,
             )
