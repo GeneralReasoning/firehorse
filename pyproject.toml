@@ -1,5 +1,5 @@
 [project]
-name = "firehorse"
+name = "firehorse-cli"
 version = "0.1.0"
 description = "Agent evaluation harness for OpenReward environments"
 authors = [

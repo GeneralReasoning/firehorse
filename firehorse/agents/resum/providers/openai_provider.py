@@ -69,7 +69,7 @@ class OpenAIProvider(ProviderClient):
         except ImportError:
             raise ImportError(
                 "openai package required for OpenAI provider. "
-                "Install with: pip install 'firehorse[resum]'"
+                "Install with: pip install 'firehorse-cli[resum]'"
             )
         self.model = model
         self._context_window_override = context_window
