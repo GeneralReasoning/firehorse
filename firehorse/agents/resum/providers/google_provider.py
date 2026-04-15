@@ -5,6 +5,15 @@ import json
 import sys
 from typing import Any, TYPE_CHECKING
 
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
+from openreward.api.environments.client import _sanitize_google_schema, _strip_titles
+
 from firehorse.agents.resum.providers.base import (
     LLMResponse,
     ProviderClient,
@@ -26,7 +35,6 @@ KNOWN_CONTEXT_WINDOWS = {
 def _sanitize_schema(schema: dict | None) -> dict | None:
     if schema is None:
         return None
-    from openreward.api.environments.client import _sanitize_google_schema, _strip_titles
     return _sanitize_google_schema(_strip_titles(schema))
 
 
@@ -34,10 +42,7 @@ class GoogleProvider(ProviderClient):
     """Google Gemini provider."""
 
     def __init__(self, model: str, api_key: str, context_window: int | None = None):
-        try:
-            from google import genai
-            from google.genai import types  # noqa: F401
-        except ImportError:
+        if genai is None or types is None:
             raise ImportError(
                 "google-genai package required for Google provider. "
                 "Install with: pip install 'firehorse-cli[resum]'"
@@ -60,8 +65,6 @@ class GoogleProvider(ProviderClient):
         return f"call_{self._call_counter}"
 
     def format_tools(self, tools: list[ToolSpec]) -> list[Any]:
-        from google.genai import types
-
         declarations = []
         for tool in tools:
             params = _sanitize_schema(dict(tool.input_schema) if tool.input_schema else None)
@@ -75,14 +78,12 @@ class GoogleProvider(ProviderClient):
         return [types.Tool(function_declarations=declarations)]
 
     def build_initial_messages(self, system_prompt: str, user_prompt: str) -> list[Any]:
-        from google.genai import types
         self._system_prompt = system_prompt
         return [
             types.Content(role="user", parts=[types.Part(text=user_prompt)]),
         ]
 
     def _build_safety_settings(self) -> list[Any]:
-        from google.genai import types
         return [
             types.SafetySetting(
                 category=types.HarmCategory.HARM_CATEGORY_CIVIC_INTEGRITY,
@@ -110,7 +111,6 @@ class GoogleProvider(ProviderClient):
         """Build Gemini thinking config based on effort level and model version."""
         if not effort:
             return None
-        from google.genai import types
 
         # Gemini 3.x uses thinking_level
         if any(v in self.model for v in ("3.0", "3.1", "3.2")):
@@ -128,8 +128,6 @@ class GoogleProvider(ProviderClient):
         max_tokens: int = 16384,
         effort: str | None = None,
     ) -> LLMResponse:
-        from google.genai import types
-
         config = types.GenerateContentConfig(
             tools=tools if tools else None,
             max_output_tokens=max_tokens,
@@ -223,8 +221,6 @@ class GoogleProvider(ProviderClient):
         tool_name: str,
         output: str,
     ) -> None:
-        from google.genai import types
-
         part = types.Part.from_function_response(
             name=tool_name,
             response={"result": output},
@@ -238,7 +234,6 @@ class GoogleProvider(ProviderClient):
         messages.append(types.Content(role="user", parts=[part]))
 
     def append_user_message(self, messages: list[Any], content: str) -> None:
-        from google.genai import types
         messages.append(types.Content(role="user", parts=[types.Part(text=content)]))
 
     def messages_to_text(self, messages: list[Any]) -> str:
@@ -269,7 +264,6 @@ class GoogleProvider(ProviderClient):
         original_prompt: str,
         summary: str,
     ) -> list[Any]:
-        from google.genai import types
         self._system_prompt = system_prompt
         return [
             types.Content(role="user", parts=[types.Part(text=original_prompt)]),
@@ -285,8 +279,6 @@ class GoogleProvider(ProviderClient):
         compaction_prompt: str,
         max_tokens: int,
     ) -> str:
-        from google.genai import types
-
         config = types.GenerateContentConfig(
             max_output_tokens=max_tokens,
             safety_settings=self._build_safety_settings(),

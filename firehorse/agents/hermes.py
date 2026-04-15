@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openreward import AssistantMessage, ToolCall, ToolResult, UserMessage
+from openreward.api.rollouts.serializers.base import ReasoningItem
+
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.agents._subprocess_common import (
     ALWAYS_USE_BUILTIN,
@@ -100,19 +103,13 @@ def _log_hermes_from_export(
     tool_call_id/tool_name/reasoning fields — proper structured data.
     We use the sidecar toolcalls JSONL for reward/finished info.
     """
-    from openreward import AssistantMessage, ToolCall, ToolResult
-    from openreward.api.rollouts.serializers.base import ReasoningItem
-
     messages = session_data.get("messages", [])
 
     # Build a lookup of sidecar events by tool name + call_id for reward info
     sidecar_events: list[dict] = []
     if toolcalls_path.exists():
-        try:
-            for line in toolcalls_path.read_text().strip().splitlines():
-                sidecar_events.append(json.loads(line))
-        except Exception:
-            pass
+        for line in toolcalls_path.read_text().strip().splitlines():
+            sidecar_events.append(json.loads(line))
     sidecar_idx = 0
 
     for msg in messages:
@@ -124,16 +121,10 @@ def _log_hermes_from_export(
             content = msg.get("content") or ""
 
             if reasoning:
-                try:
-                    rollout.log(ReasoningItem(content=reasoning[:10000]))
-                except Exception:
-                    pass
+                rollout.log(ReasoningItem(content=reasoning[:10000]))
 
             if content:
-                try:
-                    rollout.log(AssistantMessage(content=content[:10000]))
-                except Exception:
-                    pass
+                rollout.log(AssistantMessage(content=content[:10000]))
 
             # Log tool calls embedded in the assistant message
             # Hermes DB stores tool_calls as [{"name": ..., "arguments": ...}]
@@ -148,14 +139,11 @@ def _log_hermes_from_export(
                         args = json.loads(args)
                     except json.JSONDecodeError:
                         pass
-                try:
-                    rollout.log(ToolCall(
-                        name=name,
-                        content=json.dumps(args) if isinstance(args, dict) else str(args),
-                        call_id=call_id,
-                    ))
-                except Exception:
-                    pass
+                rollout.log(ToolCall(
+                    name=name,
+                    content=json.dumps(args) if isinstance(args, dict) else str(args),
+                    call_id=call_id,
+                ))
 
         elif role == "tool":
             content = msg.get("content") or ""
@@ -183,14 +171,11 @@ def _log_hermes_from_export(
                     except (json.JSONDecodeError, KeyError):
                         pass
 
-            try:
-                rollout.log(
-                    ToolResult(content=content_str, call_id=call_id),
-                    reward=reward,
-                    is_finished=is_finished,
-                )
-            except Exception:
-                pass
+            rollout.log(
+                ToolResult(content=content_str, call_id=call_id),
+                reward=reward,
+                is_finished=is_finished,
+            )
 
         elif role == "user":
             # Skip user messages — already logged the prompt
@@ -206,41 +191,25 @@ def _log_hermes_rollout_fallback(
     Used when session export is unavailable. Logs tool calls/results
     with rewards but no assistant reasoning.
     """
-    from openreward import ToolCall, ToolResult
-
     if not toolcalls_path.exists():
         return
 
-    try:
-        lines = toolcalls_path.read_text().strip().splitlines()
-    except Exception:
-        return
-
-    for line in lines:
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for line in toolcalls_path.read_text().strip().splitlines():
+        event = json.loads(line)
         call_id = event.get("call_id", "")
-        try:
-            rollout.log(ToolCall(
-                name=event.get("tool", ""),
-                content=json.dumps(event.get("arguments", {})),
+        rollout.log(ToolCall(
+            name=event.get("tool", ""),
+            content=json.dumps(event.get("arguments", {})),
+            call_id=call_id,
+        ))
+        rollout.log(
+            ToolResult(
+                content=event.get("result", ""),
                 call_id=call_id,
-            ))
-        except Exception:
-            pass
-        try:
-            rollout.log(
-                ToolResult(
-                    content=event.get("result", ""),
-                    call_id=call_id,
-                ),
-                reward=event.get("reward"),
-                is_finished=event.get("finished", False),
-            )
-        except Exception:
-            pass
+            ),
+            reward=event.get("reward"),
+            is_finished=event.get("finished", False),
+        )
 
 
 class HermesAgent(BaseAgent):
@@ -412,11 +381,7 @@ class HermesAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                from openreward import UserMessage
-                try:
-                    main_rollout.log(UserMessage(content=full_prompt))
-                except Exception:
-                    pass
+                main_rollout.log(UserMessage(content=full_prompt))
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0

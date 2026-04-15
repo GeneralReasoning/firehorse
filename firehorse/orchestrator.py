@@ -82,26 +82,17 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # Auto-detect required secrets from env vars
     secrets = dict(config.secrets)
-    try:
-        required = await env.list_required_secrets()
-        for key in required:
-            if key not in secrets:
-                # Try uppercase env var (e.g. openai_api_key -> OPENAI_API_KEY)
-                env_var = key.upper()
-                val = os.environ.get(env_var, "")
-                if val:
-                    secrets[key] = val
-                    print(f"Auto-detected secret: {key} (from ${env_var})", file=sys.stderr)
-                else:
-                    print(f"Warning: required secret '{key}' not found in env vars", file=sys.stderr)
-    except Exception as e:
-        # list_required_secrets may not be available; fall back to well-known keys
-        for key, env_var in [("openai_api_key", "OPENAI_API_KEY"), ("anthropic_api_key", "ANTHROPIC_API_KEY")]:
-            if key not in secrets:
-                val = os.environ.get(env_var, "")
-                if val:
-                    secrets[key] = val
-                    print(f"Auto-detected secret: {key} (from ${env_var})", file=sys.stderr)
+    required = await env.list_required_secrets()
+    for key in required:
+        if key not in secrets:
+            # Try uppercase env var (e.g. openai_api_key -> OPENAI_API_KEY)
+            env_var = key.upper()
+            val = os.environ.get(env_var, "")
+            if val:
+                secrets[key] = val
+                print(f"Auto-detected secret: {key} (from ${env_var})", file=sys.stderr)
+            else:
+                print(f"Warning: required secret '{key}' not found in env vars", file=sys.stderr)
 
     # Fetch tools for the banner
     tools = await env.list_tools()

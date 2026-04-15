@@ -28,6 +28,8 @@ from openreward.api.environments.types import (
     ToolCallError,
     ToolSpec,
 )
+from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS
+from firehorse.mcp.codex_descriptions import CODEX_DESCRIPTIONS
 from firehorse.mcp.convert import toolspec_to_mcp, tooloutput_to_mcp
 
 
@@ -104,8 +106,11 @@ class OpenRewardBridge:
                 if self._session_entered:
                     try:
                         await self._session.__aexit__(None, None, None)
-                    except Exception:
-                        pass
+                    except Exception as cleanup_err:
+                        print(
+                            f"[openreward-bridge] Session cleanup failed during retry: {cleanup_err}",
+                            file=sys.stderr,
+                        )
                     self._session_entered = False
                 await asyncio.sleep(delay)
 
@@ -138,10 +143,8 @@ class OpenRewardBridge:
         # Legacy path: manual description overrides when no toolset is used
         variant = os.environ.get("OPENREWARD_TOOL_DESCRIPTIONS", "claude")
         if variant == "claude":
-            from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS
             descs = BUILTIN_DESCRIPTIONS
         elif variant == "codex":
-            from firehorse.mcp.codex_descriptions import CODEX_DESCRIPTIONS
             descs = CODEX_DESCRIPTIONS
         else:
             # "env" or any other value: use environment's original descriptions

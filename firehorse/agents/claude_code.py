@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+from openreward import (
+    AssistantMessage,
+    ReasoningItem,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
@@ -195,10 +205,6 @@ def _sanitize_prompt(text: str) -> str:
 
 def _log_event_to_rollout(event: dict, rollout: Any) -> None:
     """Parse a Claude stream-json event and log it to an OpenReward rollout."""
-    from openreward import (
-        AssistantMessage, UserMessage, ReasoningItem, ToolCall, ToolResult,
-    )
-
     event_type = event.get("type")
     msg = event.get("message", {})
     if not isinstance(msg, dict):
@@ -231,10 +237,9 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
                 content = "[redacted thinking]"
                 if data.startswith("openrouter.reasoning:"):
                     try:
-                        import base64
                         decoded = json.loads(base64.b64decode(data.split(":", 1)[1]))
                         content = decoded.get("text", content)
-                    except Exception:
+                    except (ValueError, json.JSONDecodeError):
                         pass
                 if content:
                     rollout.log(ReasoningItem(content=content))
@@ -257,7 +262,6 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
                 # Extract reward/finished from [OR_REWARD:{"r":...,"f":...}] tag
                 reward = None
                 is_finished = False
-                import re
                 m = re.search(r'\[OR_REWARD:(\{[^}]+\})\]', content_str)
                 if m:
                     try:
@@ -457,18 +461,15 @@ class ClaudeCodeAgent(BaseAgent):
                 parent = event.get("parent_tool_use_id")
                 if parent:
                     if parent not in subagent_rollouts and ctx.rollout_client:
-                        try:
-                            subagent_rollouts[parent] = ctx.rollout_client.rollout.create(
-                                run_name=ctx.run_name,
-                                rollout_name=f"trial_{trial_id}_subagent_{parent}",
-                                environment=ctx.env_name,
-                                metadata={
-                                    "parent_rollout": main_rollout.event_id,
-                                    "parent_tool_use_id": parent,
-                                },
-                            )
-                        except Exception:
-                            return None
+                        subagent_rollouts[parent] = ctx.rollout_client.rollout.create(
+                            run_name=ctx.run_name,
+                            rollout_name=f"trial_{trial_id}_subagent_{parent}",
+                            environment=ctx.env_name,
+                            metadata={
+                                "parent_rollout": main_rollout.event_id,
+                                "parent_tool_use_id": parent,
+                            },
+                        )
                     return subagent_rollouts.get(parent)
                 return main_rollout
 
@@ -484,11 +485,7 @@ class ClaudeCodeAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                from openreward import UserMessage
-                try:
-                    main_rollout.log(UserMessage(content=full_prompt))
-                except Exception:
-                    pass
+                main_rollout.log(UserMessage(content=full_prompt))
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
@@ -522,10 +519,7 @@ class ClaudeCodeAgent(BaseAgent):
                     # Log to OpenReward rollout
                     rollout = _get_rollout(event)
                     if rollout:
-                        try:
-                            _log_event_to_rollout(event, rollout)
-                        except Exception:
-                            pass  # Don't let logging failures break the agent
+                        _log_event_to_rollout(event, rollout)
 
                     # Detect MCP server failure from system.init event
                     if event.get("type") == "system" and event.get("subtype") == "init":

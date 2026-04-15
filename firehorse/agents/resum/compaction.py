@@ -9,6 +9,11 @@ import sys
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+try:
+    from google.genai import types as google_types
+except ImportError:
+    google_types = None
+
 if TYPE_CHECKING:
     from firehorse.agents.resum.providers.base import ProviderClient
 
@@ -161,7 +166,9 @@ def _micro_compact_anthropic(messages: list[Any], protect_last_n: int) -> tuple[
 
 def _micro_compact_google(messages: list[Any], protect_last_n: int) -> tuple[list[Any], int]:
     """Micro-compact for Google Content objects with function_response parts."""
-    from google.genai import types
+    if google_types is None:
+        raise RuntimeError("install 'google-genai' to use the Google provider (pip install google-genai)")
+    types = google_types
 
     # Collect all (msg_index, part_index) for function_response parts
     fr_locs: list[tuple[int, int]] = []

@@ -5,6 +5,13 @@ import json
 import sys
 from typing import Any, TYPE_CHECKING
 
+try:
+    import openai
+except ImportError:
+    openai = None
+
+from openreward.api.environments.client import _sanitize_openai_schema, _strip_titles
+
 from firehorse.agents.resum.providers.base import (
     LLMResponse,
     ProviderClient,
@@ -38,7 +45,6 @@ def _sanitize_schema(schema: dict | None) -> dict | None:
     """Remove keys unsupported by OpenAI function calling."""
     if schema is None:
         return None
-    from openreward.api.environments.client import _sanitize_openai_schema, _strip_titles
     return _sanitize_openai_schema(_strip_titles(schema))
 
 
@@ -64,9 +70,7 @@ class OpenAIProvider(ProviderClient):
         base_url: str | None = None,
         context_window: int | None = None,
     ):
-        try:
-            import openai
-        except ImportError:
+        if openai is None:
             raise ImportError(
                 "openai package required for OpenAI provider. "
                 "Install with: pip install 'firehorse-cli[resum]'"
@@ -100,8 +104,6 @@ class OpenAIProvider(ProviderClient):
         max_tokens: int = 16384,
         effort: str | None = None,
     ) -> LLMResponse:
-        import openai as openai_mod
-
         # Newer OpenAI models (gpt-5.x, o-series) require max_completion_tokens
         uses_completion_tokens = any(self.model.startswith(p) for p in ("gpt-5", "o3", "o4", "o1"))
         token_key = "max_completion_tokens" if uses_completion_tokens else "max_tokens"
@@ -123,12 +125,12 @@ class OpenAIProvider(ProviderClient):
         for attempt in range(5):
             try:
                 response = await self._client.chat.completions.create(**kwargs)
-            except openai_mod.BadRequestError as e:
+            except openai.BadRequestError as e:
                 err_msg = str(e).lower()
                 if "context length" in err_msg or "maximum" in err_msg and "token" in err_msg:
                     return LLMResponse(raw_message=None, context_overflow=True)
                 raise
-            except (openai_mod.RateLimitError, openai_mod.APITimeoutError, openai_mod.InternalServerError) as e:
+            except (openai.RateLimitError, openai.APITimeoutError, openai.InternalServerError) as e:
                 last_err = e
                 wait = min(2 ** attempt, 60)
                 print(f"[resum/openai] Retry {attempt + 1}/5 after {type(e).__name__}, waiting {wait}s", file=sys.stderr)

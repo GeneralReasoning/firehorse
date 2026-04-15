@@ -6,3 +6,4 @@ build/
 .venv/
 *.egg
 uv.lock
+.env

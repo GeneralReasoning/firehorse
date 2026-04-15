@@ -6,13 +6,18 @@ to route tool calls through an OpenReward session sandbox.
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
+import re
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+from openreward import AssistantMessage, ToolCall, ToolResult, UserMessage
+from openreward.api.rollouts.serializers.base import ReasoningItem
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.agents._subprocess_common import (
@@ -81,10 +86,6 @@ def _log_openclaw_from_session(
     ``{"type":"thinking","thinking":"..."}`` / ``{"type":"text","text":"..."}``
     / ``{"type":"toolCall","id":"...","name":"...","arguments":{...}}``.
     """
-    import re
-    from openreward import AssistantMessage, ToolCall, ToolResult
-    from openreward.api.rollouts.serializers.base import ReasoningItem
-
     if not session_jsonl_path.exists():
         print(f"[openclaw] Session file not found: {session_jsonl_path}", file=sys.stderr)
         _log_toolcalls_fallback(toolcalls_path, rollout)
@@ -93,24 +94,16 @@ def _log_openclaw_from_session(
     # Build sidecar reward lookup
     sidecar_events: list[dict] = []
     if toolcalls_path.exists():
-        try:
-            for line in toolcalls_path.read_text().strip().splitlines():
-                sidecar_events.append(json.loads(line))
-        except Exception:
-            pass
+        for line in toolcalls_path.read_text().strip().splitlines():
+            sidecar_events.append(json.loads(line))
     sidecar_idx = 0
 
     # Parse session JSONL entries (linear scan — good enough for single-turn agents)
     entries: list[dict] = []
-    try:
-        for line in session_jsonl_path.read_text().strip().splitlines():
-            entry = json.loads(line)
-            if entry.get("type") == "message":
-                entries.append(entry)
-    except Exception as e:
-        print(f"[openclaw] Failed to parse session JSONL: {e}", file=sys.stderr)
-        _log_toolcalls_fallback(toolcalls_path, rollout)
-        return
+    for line in session_jsonl_path.read_text().strip().splitlines():
+        entry = json.loads(line)
+        if entry.get("type") == "message":
+            entries.append(entry)
 
     print(f"[openclaw] Session has {len(entries)} messages", file=sys.stderr)
 
@@ -126,10 +119,7 @@ def _log_openclaw_from_session(
             content_blocks = msg.get("content", [])
             if isinstance(content_blocks, str):
                 # Simple text content
-                try:
-                    rollout.log(AssistantMessage(content=content_blocks[:10000]))
-                except Exception:
-                    pass
+                rollout.log(AssistantMessage(content=content_blocks[:10000]))
                 continue
 
             for block in content_blocks:
@@ -140,31 +130,22 @@ def _log_openclaw_from_session(
                 if btype == "thinking":
                     thinking = block.get("thinking", "")
                     if thinking:
-                        try:
-                            rollout.log(ReasoningItem(content=thinking[:10000]))
-                        except Exception:
-                            pass
+                        rollout.log(ReasoningItem(content=thinking[:10000]))
 
                 elif btype == "text":
                     text = block.get("text", "")
                     if text:
-                        try:
-                            rollout.log(AssistantMessage(content=text[:10000]))
-                        except Exception:
-                            pass
+                        rollout.log(AssistantMessage(content=text[:10000]))
 
                 elif btype == "toolCall":
                     call_id = block.get("id", "")
                     name = block.get("name", "")
                     args = block.get("arguments", {})
-                    try:
-                        rollout.log(ToolCall(
-                            name=name,
-                            content=json.dumps(args) if isinstance(args, dict) else str(args),
-                            call_id=call_id,
-                        ))
-                    except Exception:
-                        pass
+                    rollout.log(ToolCall(
+                        name=name,
+                        content=json.dumps(args) if isinstance(args, dict) else str(args),
+                        call_id=call_id,
+                    ))
 
         elif role == "toolResult":
             call_id = msg.get("toolCallId", "")
@@ -196,37 +177,30 @@ def _log_openclaw_from_session(
                     except (json.JSONDecodeError, KeyError):
                         pass
 
-            try:
-                rollout.log(
-                    ToolResult(content=content_str, call_id=call_id),
-                    reward=reward,
-                    is_finished=is_finished,
-                )
-            except Exception:
-                pass
+            rollout.log(
+                ToolResult(content=content_str, call_id=call_id),
+                reward=reward,
+                is_finished=is_finished,
+            )
 
 
 def _log_toolcalls_fallback(toolcalls_path: Path, rollout: Any) -> None:
     """Fallback: log only sidecar tool calls when session JSONL is unavailable."""
     if not toolcalls_path.exists():
         return
-    from openreward import ToolCall, ToolResult
-    try:
-        for line in toolcalls_path.read_text().strip().splitlines():
-            event = json.loads(line)
-            call_id = event.get("call_id", "")
-            rollout.log(ToolCall(
-                name=event.get("tool", ""),
-                content=json.dumps(event.get("arguments", {})),
-                call_id=call_id,
-            ))
-            rollout.log(
-                ToolResult(content=event.get("result", ""), call_id=call_id),
-                reward=event.get("reward"),
-                is_finished=event.get("finished", False),
-            )
-    except Exception:
-        pass
+    for line in toolcalls_path.read_text().strip().splitlines():
+        event = json.loads(line)
+        call_id = event.get("call_id", "")
+        rollout.log(ToolCall(
+            name=event.get("tool", ""),
+            content=json.dumps(event.get("arguments", {})),
+            call_id=call_id,
+        ))
+        rollout.log(
+            ToolResult(content=event.get("result", ""), call_id=call_id),
+            reward=event.get("reward"),
+            is_finished=event.get("finished", False),
+        )
 
 
 class OpenClawAgent(BaseAgent):
@@ -414,11 +388,7 @@ class OpenClawAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                from openreward import UserMessage
-                try:
-                    main_rollout.log(UserMessage(content=full_prompt))
-                except Exception:
-                    pass
+                main_rollout.log(UserMessage(content=full_prompt))
 
             # --- Read stdout and stderr concurrently ---
             # OpenClaw outputs its JSON result to stderr (via runtime.log),
@@ -436,7 +406,7 @@ class OpenClawAgent(BaseAgent):
                     stdout_chunks.append(chunk)
 
             # Strip ANSI escape codes for cleaner log parsing.
-            _ANSI_RE = __import__("re").compile(r"\x1b\[[0-9;]*m")
+            _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
             async def read_stderr():
                 nonlocal turns_used
@@ -525,8 +495,7 @@ class OpenClawAgent(BaseAgent):
                 session_jsonl = openclaw_dir / "agents" / "main" / "sessions" / f"orwd-{trial_id}.jsonl"
                 # Glob in case the filename varies
                 if not session_jsonl.exists():
-                    import glob as _glob
-                    candidates = _glob.glob(str(openclaw_dir / "agents" / "*" / "sessions" / f"*orwd*{trial_id}*.jsonl"))
+                    candidates = glob.glob(str(openclaw_dir / "agents" / "*" / "sessions" / f"*orwd*{trial_id}*.jsonl"))
                     if candidates:
                         session_jsonl = Path(candidates[0])
                 _log_openclaw_from_session(session_jsonl, toolcalls_path, main_rollout)
