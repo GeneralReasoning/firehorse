@@ -7,7 +7,7 @@ authors = [
 ]
 
 dependencies = [
-    "openreward>=0.1.94",
+    "openreward>=0.1.96",
     "mcp>=1.0.0",
 ]
 
