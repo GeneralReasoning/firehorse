@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import os
 import random
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from openreward.client import AsyncOpenReward
+from openreward.models import RunInfo
 from firehorse.agents import get_agent
 from firehorse.agents.claude_code import ENV_TO_BUILTIN
 from firehorse.config import RunConfig, TrialConfig
@@ -48,13 +51,33 @@ def _print_banner(
     print(f"\nStarting trials...\n", file=sys.stderr)
 
 
+def _get_firehorse_version() -> str:
+    try:
+        return importlib.metadata.version("firehorse")
+    except importlib.metadata.PackageNotFoundError:
+        try:
+            return "dev+" + subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=os.path.dirname(__file__),
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+        except Exception:
+            return "dev"
+
+
 async def run_evaluation(config: RunConfig) -> RunSummary:
     # Validate provider credentials early
     if config.model.startswith("openrouter/") and not os.environ.get("OPENROUTER_API_KEY"):
         print("Error: OPENROUTER_API_KEY environment variable required for openrouter/ models", file=sys.stderr)
         raise SystemExit(1)
 
-    client = AsyncOpenReward()
+    run_info = RunInfo(
+        model_name=config.model,
+        run_type="eval",
+        framework="firehorse",
+        framework_version=_get_firehorse_version(),
+    )
+    client = AsyncOpenReward(run_info=run_info)
     env = client.environments.get(config.env)
 
     # List tasks

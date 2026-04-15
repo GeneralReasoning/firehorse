@@ -17,6 +17,7 @@ from openreward import (
     ToolResult,
     UserMessage,
 )
+from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
@@ -308,7 +309,7 @@ class ClaudeCodeAgent(BaseAgent):
         with tempfile.TemporaryDirectory(prefix="orwd-trial-") as tmpdir:
             tmppath = Path(tmpdir)
             result_file = tmppath / "result.json"
-            trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index if ctx.task_index is not None else "unknown"))
+            trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
             log_dir = Path(ctx.output_dir) if ctx.output_dir else None
 
             env_tool_names = [t.name for t in ctx.tools]
@@ -452,7 +453,7 @@ class ClaudeCodeAgent(BaseAgent):
                         environment=ctx.env_name,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"model": ctx.model, "agent": "claude-code", "effort": ctx.effort},
+                        metadata={"effort": ctx.effort},
                     )
                     print(f"[claude-code] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}", file=sys.stderr)
                 except Exception as e:
@@ -488,7 +489,10 @@ class ClaudeCodeAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                main_rollout.log(UserMessage(content=full_prompt))
+                main_rollout.log(
+                    UserMessage(content=full_prompt),
+                    rollout_info=RolloutInfo(task_index=ctx.task_index, harness="claude-code"),
+                )
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
