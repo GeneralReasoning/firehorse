@@ -29,7 +29,6 @@ async def command_run(
     logging: bool = True,
     use_env_descriptions: bool = False,
     use_all_filesystem_tools: bool = False,
-    toolset: str | None = None,
 ) -> int:
     disabled = []
     if disable_builtin_tools:
@@ -54,7 +53,6 @@ async def command_run(
         logging=logging,
         use_builtin_descriptions=not use_env_descriptions,
         use_all_filesystem_tools=use_all_filesystem_tools,
-        toolset_name=toolset,
     )
 
     summary = await run_evaluation(config)
@@ -111,11 +109,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--use-all-filesystem-tools", action="store_true", default=False,
         help="Codex: expose all filesystem tools via MCP (default: only bash, others filtered)",
     )
-    parser.add_argument(
-        "--toolset", default=None,
-        help="SDK toolset name. Automatically set to the agent name for claude-code/codex. "
-             "Leave unset for hermes/openclaw (they use their own native tools).",
-    )
     return parser
 
 
@@ -151,7 +144,6 @@ def main(argv: list[str] | None = None) -> int:
             logging=not args.no_logging,
             use_env_descriptions=args.use_env_descriptions,
             use_all_filesystem_tools=args.use_all_filesystem_tools,
-            toolset=args.toolset,
         ))
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)
