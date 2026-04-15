@@ -113,8 +113,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--toolset", default=None,
-        help="SDK toolset name (e.g. hermes-sandboxed, openclaw-sandboxed). "
-             "Defaults to agent name for claude-code/codex; omitted for hermes/openclaw (full mode).",
+        help="SDK toolset name. Automatically set to the agent name for claude-code/codex. "
+             "Leave unset for hermes/openclaw (they use their own native tools).",
     )
     return parser
 

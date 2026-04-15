@@ -12,8 +12,6 @@ Cross-references use MCP tool names (mcp__openreward__*) with "if available"
 since not all environments provide every tool.
 
 Source: https://github.com/anthropics/claude-code (src/tools/)
-
-See legacy_builtin_descriptions.py for the original Claude Code descriptions.
 """
 from __future__ import annotations
 

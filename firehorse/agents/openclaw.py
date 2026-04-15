@@ -15,94 +15,14 @@ from pathlib import Path
 from typing import Any
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
-
-# Env tools that should not be exposed via MCP — the agent's own
-# planning/tracking tools are preferred.
-ALWAYS_USE_BUILTIN = {"todo_write", "todowrite"}
-
-# Submission tool names to remind the agent about.
-SUBMISSION_TOOL_NAMES = {"submit", "answer", "submit_answer"}
-
-# Buffer limit for subprocess stdout/stderr line reading.
-_SUBPROCESS_LINE_LIMIT = 10 * 1024 * 1024  # 10 MB
-
-
-def _build_openclaw_prompt(
-    env_tool_names: list[str],
-    mcp_server_name: str = "openreward",
-    sandboxed: bool = False,
-) -> str:
-    """Build MCP tool instructions appended to the user prompt."""
-    if not env_tool_names:
-        return ""
-
-    if sandboxed:
-        preamble = (
-            "You are solving a task in an OpenReward environment. The environment provides "
-            "tools via an MCP server named 'openreward'. Use these MCP tools instead of "
-            "your built-in exec, process, read, write, edit, and apply_patch tools for "
-            "all file and shell operations. You may still use any of your other built-in "
-            "tools (web_search, browser, web_fetch, etc.) if they are helpful."
-        )
-    else:
-        preamble = (
-            "You are solving a task in an OpenReward environment. The environment provides "
-            "additional tools via an MCP server named 'openreward'. Use your built-in tools "
-            "normally for file operations, terminal commands, web search, etc. The MCP tools "
-            "below are for environment-specific actions (e.g. submitting answers)."
-        )
-
-    lines = [
-        "",
-        "# OpenReward Environment Tools",
-        "",
-        preamble,
-        "",
-        "Available MCP tools:",
-    ]
-
-    for name in env_tool_names:
-        if name.lower() in ALWAYS_USE_BUILTIN:
-            continue
-        lines.append(f"- `mcp__{mcp_server_name}__{name}`")
-
-    lines.append("")
-    lines.append("## Termination")
-    lines.append("")
-    lines.append(
-        "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
-        "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE]."
-    )
-
-    return "\n".join(lines)
-
-
-def _build_submission_reminder(
-    env_tool_names: list[str], mcp_server_name: str = "openreward",
-) -> str:
-    """Build a prompt reminder telling the agent to call submission tools."""
-    submission_tools = []
-    for name in env_tool_names:
-        if name.lower() in SUBMISSION_TOOL_NAMES:
-            submission_tools.append(f"mcp__{mcp_server_name}__{name}")
-
-    if not submission_tools:
-        return ""
-
-    tool_list = ", ".join(f"`{t}`" for t in submission_tools)
-    return (
-        f"Submission Reminder:\n"
-        f"This environment has a submission tool: {tool_list}. "
-        f"You MUST call this tool to submit your final answer before you finish. "
-        f"If you stop without calling it, your work will not be scored."
-    )
-
-
-def _sanitize_prompt(text: str) -> str:
-    """Ensure prompt text doesn't start with '-'."""
-    if text.startswith("-"):
-        return " " + text
-    return text
+from firehorse.agents._subprocess_common import (
+    ALWAYS_USE_BUILTIN,
+    SUBPROCESS_LINE_LIMIT,
+    build_mcp_prompt_section,
+    build_submission_reminder,
+    format_mcp_name_double,
+    sanitize_prompt,
+)
 
 
 def _resolve_openclaw_model(model: str) -> tuple[str, str]:
@@ -355,10 +275,9 @@ class OpenClawAgent(BaseAgent):
                 "OPENREWARD_TASK_NAMESPACE": session_task.namespace or "",
                 "OPENREWARD_RESULT_FILE": str(result_file),
             }
-            if ctx.toolset_name:
-                mcp_env["OPENREWARD_TOOLSET_NAME"] = ctx.toolset_name
-            else:
-                mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "env"
+            # OpenClaw uses its own native tools; env tools come through MCP
+            # with their original descriptions from the environment.
+            mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "env"
             if os.environ.get("OPENREWARD_URL"):
                 mcp_env["OPENREWARD_URL"] = os.environ["OPENREWARD_URL"]
             if ctx.secrets:
@@ -395,9 +314,6 @@ class OpenClawAgent(BaseAgent):
             auth_profiles = _build_auth_profiles(oc_provider)
             (agent_dir / "auth-profiles.json").write_text(json.dumps(auth_profiles, indent=2))
 
-            # Determine if we're running in sandboxed mode
-            sandboxed = ctx.toolset_name == "openclaw-sandboxed"
-
             openclaw_config: dict[str, Any] = {
                 "agents": {
                     "defaults": {
@@ -426,27 +342,19 @@ class OpenClawAgent(BaseAgent):
                     }
                 },
             }
-            if sandboxed:
-                # Deny built-in filesystem/shell tools — use MCP equivalents
-                openclaw_config["tools"] = {
-                    "deny": ["group:runtime", "group:fs"],
-                }
             config_path = openclaw_dir / "openclaw.json"
             config_path.write_text(json.dumps(openclaw_config, indent=2))
 
-            # Build prompt
-            mcp_section = _build_openclaw_prompt(env_tool_names, sandboxed=sandboxed)
-            termination = (
-                "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
-                "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE]."
-            )
-            full_prompt = f"{ctx.prompt_text}\n\nTermination Instructions:\n{termination}"
+            # Build prompt: user prompt + MCP tool section (which includes
+            # termination instructions) + optional submission reminder.
+            mcp_section = build_mcp_prompt_section(env_tool_names, format_mcp_name_double)
+            submission_reminder = build_submission_reminder(env_tool_names, format_mcp_name_double)
+            full_prompt = ctx.prompt_text
             if mcp_section:
                 full_prompt = f"{full_prompt}\n{mcp_section}"
-            submission_reminder = _build_submission_reminder(env_tool_names)
             if submission_reminder:
                 full_prompt = f"{full_prompt}\n\n{submission_reminder}"
-            full_prompt = _sanitize_prompt(full_prompt)
+            full_prompt = sanitize_prompt(full_prompt)
 
             # Build command
             cmd = [
@@ -469,7 +377,7 @@ class OpenClawAgent(BaseAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
-                limit=_SUBPROCESS_LINE_LIMIT,
+                limit=SUBPROCESS_LINE_LIMIT,
             )
 
             # --- JSONL logging ---

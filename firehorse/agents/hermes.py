@@ -16,94 +16,14 @@ from pathlib import Path
 from typing import Any
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
-
-# Env tools that should not be exposed via MCP — the agent's own
-# planning/tracking tools are preferred.
-ALWAYS_USE_BUILTIN = {"todo_write", "todowrite"}
-
-# Submission tool names to remind the agent about.
-SUBMISSION_TOOL_NAMES = {"submit", "answer", "submit_answer"}
-
-# Buffer limit for subprocess stdout/stderr line reading.
-_SUBPROCESS_LINE_LIMIT = 10 * 1024 * 1024  # 10 MB
-
-
-def _build_hermes_prompt(
-    env_tool_names: list[str],
-    mcp_server_name: str = "openreward",
-    sandboxed: bool = False,
-) -> str:
-    """Build MCP tool instructions appended to the user prompt."""
-    if not env_tool_names:
-        return ""
-
-    if sandboxed:
-        preamble = (
-            "You are solving a task in an OpenReward environment. The environment provides "
-            "tools via an MCP server named 'openreward'. Use these MCP tools instead of "
-            "your built-in terminal, read_file, write_file, search_files, and patch tools "
-            "for all file and shell operations. You may still use any of your other "
-            "built-in tools (web_search, browser, vision, memory, etc.) if they are helpful."
-        )
-    else:
-        preamble = (
-            "You are solving a task in an OpenReward environment. The environment provides "
-            "additional tools via an MCP server named 'openreward'. Use your built-in tools "
-            "normally for file operations, terminal commands, web search, etc. The MCP tools "
-            "below are for environment-specific actions (e.g. submitting answers)."
-        )
-
-    lines = [
-        "",
-        "# OpenReward Environment Tools",
-        "",
-        preamble,
-        "",
-        "Available MCP tools:",
-    ]
-
-    for name in env_tool_names:
-        if name.lower() in ALWAYS_USE_BUILTIN:
-            continue
-        lines.append(f"- `mcp_{mcp_server_name}_{name}`")
-
-    lines.append("")
-    lines.append("## Termination")
-    lines.append("")
-    lines.append(
-        "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
-        "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE]."
-    )
-
-    return "\n".join(lines)
-
-
-def _build_submission_reminder(
-    env_tool_names: list[str], mcp_server_name: str = "openreward",
-) -> str:
-    """Build a prompt reminder telling the agent to call submission tools."""
-    submission_tools = []
-    for name in env_tool_names:
-        if name.lower() in SUBMISSION_TOOL_NAMES:
-            submission_tools.append(f"mcp_{mcp_server_name}_{name}")
-
-    if not submission_tools:
-        return ""
-
-    tool_list = ", ".join(f"`{t}`" for t in submission_tools)
-    return (
-        f"Submission Reminder:\n"
-        f"This environment has a submission tool: {tool_list}. "
-        f"You MUST call this tool to submit your final answer before you finish. "
-        f"If you stop without calling it, your work will not be scored."
-    )
-
-
-def _sanitize_prompt(text: str) -> str:
-    """Ensure prompt text doesn't start with '-'."""
-    if text.startswith("-"):
-        return " " + text
-    return text
+from firehorse.agents._subprocess_common import (
+    ALWAYS_USE_BUILTIN,
+    SUBPROCESS_LINE_LIMIT,
+    build_mcp_prompt_section,
+    build_submission_reminder,
+    format_mcp_name_single,
+    sanitize_prompt,
+)
 
 
 def _resolve_model_hermes(
@@ -370,10 +290,9 @@ class HermesAgent(BaseAgent):
                 "OPENREWARD_TASK_NAMESPACE": session_task.namespace or "",
                 "OPENREWARD_RESULT_FILE": str(result_file),
             }
-            if ctx.toolset_name:
-                mcp_env["OPENREWARD_TOOLSET_NAME"] = ctx.toolset_name
-            else:
-                mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "env"
+            # Hermes uses its own native tools; env tools come through MCP
+            # with their original descriptions from the environment.
+            mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "env"
             if os.environ.get("OPENREWARD_URL"):
                 mcp_env["OPENREWARD_URL"] = os.environ["OPENREWARD_URL"]
             if ctx.secrets:
@@ -399,9 +318,6 @@ class HermesAgent(BaseAgent):
             hermes_home.mkdir()
             (hermes_home / "sessions").mkdir()
 
-            # Determine if we're running in sandboxed mode
-            sandboxed = ctx.toolset_name == "hermes-sandboxed"
-
             # Hermes config.yaml with MCP server
             hermes_config: dict[str, Any] = {
                 "mcp_servers": {
@@ -413,9 +329,6 @@ class HermesAgent(BaseAgent):
                     }
                 },
             }
-            if sandboxed:
-                # Disable built-in terminal/file tools — use MCP equivalents
-                hermes_config["disabled_toolsets"] = ["terminal", "file"]
             config_path = hermes_home / "config.yaml"
             # YAML is a superset of JSON, so JSON content works in a .yaml file
             config_path.write_text(json.dumps(hermes_config, indent=2))
@@ -423,19 +336,16 @@ class HermesAgent(BaseAgent):
             # Resolve model
             model_name, provider = _resolve_model_hermes(ctx.model, ctx.provider_url)
 
-            # Build prompt
-            mcp_section = _build_hermes_prompt(env_tool_names, sandboxed=sandboxed)
-            termination = (
-                "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
-                "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE]."
-            )
-            full_prompt = f"{ctx.prompt_text}\n\nTermination Instructions:\n{termination}"
+            # Build prompt: user prompt + MCP tool section (which includes
+            # termination instructions) + optional submission reminder.
+            mcp_section = build_mcp_prompt_section(env_tool_names, format_mcp_name_single)
+            submission_reminder = build_submission_reminder(env_tool_names, format_mcp_name_single)
+            full_prompt = ctx.prompt_text
             if mcp_section:
                 full_prompt = f"{full_prompt}\n{mcp_section}"
-            submission_reminder = _build_submission_reminder(env_tool_names)
             if submission_reminder:
                 full_prompt = f"{full_prompt}\n\n{submission_reminder}"
-            full_prompt = _sanitize_prompt(full_prompt)
+            full_prompt = sanitize_prompt(full_prompt)
 
             # Build command
             cmd = [
@@ -465,7 +375,7 @@ class HermesAgent(BaseAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
-                limit=_SUBPROCESS_LINE_LIMIT,
+                limit=SUBPROCESS_LINE_LIMIT,
             )
 
             # --- JSONL logging ---
