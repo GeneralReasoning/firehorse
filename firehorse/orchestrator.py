@@ -116,7 +116,8 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
     if output_dir is None:
         output_dir = run_name
     os.makedirs(output_dir, exist_ok=True)
-    print(f"Trajectory logs: {os.path.abspath(output_dir)}/", file=sys.stderr)
+    display_path = os.environ.get("FIREHORSE_HOST_OUTPUT") or os.path.abspath(output_dir)
+    print(f"Trajectory logs: {display_path}/", file=sys.stderr)
 
     semaphore = asyncio.Semaphore(config.n_concurrent)
     completed_count = 0
@@ -188,6 +189,6 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # Write aggregate run_result.json
     summary.write_json(Path(output_dir) / "run_result.json")
-    print(f"Results: {os.path.abspath(output_dir)}/run_result.json", file=sys.stderr)
+    print(f"Results: {display_path}/run_result.json", file=sys.stderr)
 
     return summary

@@ -29,6 +29,9 @@ async def command_run(
     logging: bool = True,
     use_env_descriptions: bool = False,
     use_all_filesystem_tools: bool = False,
+    no_docker: bool = False,
+    docker_image: str | None = None,
+    docker_build: bool = False,
 ) -> int:
     disabled = []
     if disable_builtin_tools:
@@ -54,6 +57,15 @@ async def command_run(
         use_builtin_descriptions=not use_env_descriptions,
         use_all_filesystem_tools=use_all_filesystem_tools,
     )
+
+    if not no_docker or docker_image:
+        from firehorse.docker import DockerConfig, run_in_container
+        docker_config = DockerConfig(
+            enabled=True,
+            image=docker_image,
+            force_build=docker_build,
+        )
+        return run_in_container(config, docker_config)
 
     summary = await run_evaluation(config)
     return 0 if summary.failed == 0 else 1
@@ -109,6 +121,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--use-all-filesystem-tools", action="store_true", default=False,
         help="Codex: expose all filesystem tools via MCP (default: only bash, others filtered)",
     )
+    parser.add_argument(
+        "--no-docker", action="store_true", default=False,
+        help="Run directly on host instead of inside a Docker container",
+    )
+    parser.add_argument(
+        "--docker-image", default=None,
+        help="Use a pre-built Docker image (skips auto-build)",
+    )
+    parser.add_argument(
+        "--docker-build", action="store_true", default=False,
+        help="Force rebuild the Docker image",
+    )
     return parser
 
 
@@ -144,6 +168,9 @@ def main(argv: list[str] | None = None) -> int:
             logging=not args.no_logging,
             use_env_descriptions=args.use_env_descriptions,
             use_all_filesystem_tools=args.use_all_filesystem_tools,
+            no_docker=args.no_docker,
+            docker_image=args.docker_image,
+            docker_build=args.docker_build,
         ))
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)

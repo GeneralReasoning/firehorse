@@ -16,12 +16,17 @@ When running an evaluation, Firehorse manages concurrent trial execution and pro
 
 ## Features
 
+- **Docker isolation** — evaluations run inside Docker containers by default for safety
 - **Multiple agent types** — Claude Code (MCP-based), ReAct, ReSum (with context compaction), and Codex
 - **Multi-provider** — Anthropic, OpenAI, Google Gemini, OpenRouter, or any OpenAI-compatible endpoint
 - **Concurrent execution** — run trials in parallel with configurable concurrency
 - **Structured logging** — JSONL trajectories, per-trial results, and aggregate run summaries
 - **OpenReward integration** — real-time rollout streaming to the OpenReward platform
 - **Secret management** — automatic provider key detection and per-trial secret injection
+
+## Requirements
+
+- **Docker** — evaluations run inside Docker containers by default. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) or the Docker Engine. Pass `--no-docker` to run directly on the host instead.
 
 ## Installation
 
@@ -158,6 +163,11 @@ Options:
   --use-env-descriptions   Use environment tool descriptions instead of built-in ones
   --use-all-filesystem-tools  Expose all filesystem tools via MCP (codex only)
   --no-logging       Disable OpenReward rollout streaming
+
+Docker:
+  --no-docker        Run directly on host instead of inside Docker (default: Docker)
+  --docker-image     Use a pre-built Docker image (skips auto-build)
+  --docker-build     Force rebuild the Docker image
 ```
 
 ## Output
