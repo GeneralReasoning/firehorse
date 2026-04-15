@@ -78,6 +78,7 @@ class OpenAIProvider(ProviderClient):
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
         self._system_prompt: str = ""
+        self._reasoning_unsupported: bool = False
 
     @property
     def context_window(self) -> int | None:
@@ -110,7 +111,7 @@ class OpenAIProvider(ProviderClient):
         }
         if tools:
             kwargs["tools"] = tools
-        if effort:
+        if effort and not self._reasoning_unsupported:
             mapped = "high" if effort == "max" else effort
             kwargs["reasoning"] = {"effort": mapped}
 
@@ -120,6 +121,12 @@ class OpenAIProvider(ProviderClient):
                 response = await self._client.responses.create(**kwargs)
             except openai_mod.BadRequestError as e:
                 err_msg = str(e).lower()
+                if "reasoning" in err_msg and "not supported" in err_msg:
+                    # Model doesn't support reasoning — retry without it
+                    self._reasoning_unsupported = True
+                    kwargs.pop("reasoning", None)
+                    print(f"\n⚠  WARNING: {self.model} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+                    continue
                 if "context length" in err_msg or ("maximum" in err_msg and "token" in err_msg):
                     return LLMResponse(raw_message=None, context_overflow=True)
                 raise

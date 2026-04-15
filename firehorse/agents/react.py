@@ -355,6 +355,7 @@ class ReactAgent(BaseAgent):
         last_reward: float | None = None
         total_input = 0
         total_output = 0
+        reasoning_unsupported = False
 
         while not finished:
             if ctx.max_turns and turns_used >= ctx.max_turns:
@@ -366,10 +367,20 @@ class ReactAgent(BaseAgent):
                 "input": input_list,
                 "instructions": SYSTEM_PROMPT,
             }
-            if ctx.effort and any(model_name.startswith(p) for p in ("o3", "o4", "o1")):
-                resp_kwargs["reasoning"] = {"effort": "high" if ctx.effort == "max" else ctx.effort}
+            if ctx.effort and not reasoning_unsupported:
+                mapped = "high" if ctx.effort == "max" else ctx.effort
+                resp_kwargs["reasoning"] = {"effort": mapped}
 
-            response = await client.responses.create(**resp_kwargs)
+            try:
+                response = await client.responses.create(**resp_kwargs)
+            except Exception as e:
+                if "reasoning" in str(e).lower() and "not supported" in str(e).lower():
+                    reasoning_unsupported = True
+                    resp_kwargs.pop("reasoning", None)
+                    print(f"\n⚠  WARNING: {model_name} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+                    response = await client.responses.create(**resp_kwargs)
+                else:
+                    raise
 
             if response.usage:
                 total_input += response.usage.input_tokens
@@ -602,6 +613,7 @@ class ReactAgent(BaseAgent):
         total_input = 0
         total_output = 0
         empty_choice_retries = 0
+        reasoning_unsupported = False
 
         while not finished:
             if ctx.max_turns and turns_used >= ctx.max_turns:
@@ -612,10 +624,19 @@ class ReactAgent(BaseAgent):
                 "tools": tools,
                 "messages": messages,
             }
-            if ctx.effort:
+            if ctx.effort and not reasoning_unsupported:
                 or_kwargs["reasoning_effort"] = "xhigh" if ctx.effort == "max" else ctx.effort
 
-            response = await client.chat.completions.create(**or_kwargs)
+            try:
+                response = await client.chat.completions.create(**or_kwargs)
+            except Exception as e:
+                if "reasoning" in str(e).lower() and "not supported" in str(e).lower():
+                    reasoning_unsupported = True
+                    or_kwargs.pop("reasoning_effort", None)
+                    print(f"\n⚠  WARNING: {model_name} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+                    response = await client.chat.completions.create(**or_kwargs)
+                else:
+                    raise
 
             if not response.choices:
                 empty_choice_retries += 1
