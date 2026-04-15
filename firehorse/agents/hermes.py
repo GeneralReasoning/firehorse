@@ -181,6 +181,7 @@ def _log_hermes_from_export(
     We use the sidecar toolcalls JSONL for reward/finished info.
     """
     from openreward import AssistantMessage, ToolCall, ToolResult
+    from openreward.api.rollouts.serializers.base import ReasoningItem
 
     messages = session_data.get("messages", [])
 
@@ -204,7 +205,7 @@ def _log_hermes_from_export(
 
             if reasoning:
                 try:
-                    rollout.log(AssistantMessage(content=f"<thinking>\n{reasoning[:10000]}\n</thinking>"))
+                    rollout.log(ReasoningItem(content=reasoning[:10000]))
                 except Exception:
                     pass
 
