@@ -49,19 +49,18 @@ def _sanitize_schema(schema: dict | None) -> dict | None:
 
 
 def _format_tool(tool: ToolSpec) -> dict:
+    """Format a ToolSpec for the OpenAI Responses API."""
     params = _sanitize_schema(dict(tool.input_schema) if tool.input_schema else None)
     return {
         "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": params or {"type": "object", "properties": {}},
-        },
+        "name": tool.name,
+        "description": tool.description,
+        "parameters": params or {"type": "object", "properties": {}},
     }
 
 
 class OpenAIProvider(ProviderClient):
-    """OpenAI Chat Completions provider."""
+    """OpenAI Responses API provider."""
 
     def __init__(
         self,
@@ -81,6 +80,8 @@ class OpenAIProvider(ProviderClient):
         if base_url:
             kwargs["base_url"] = base_url
         self._client = openai.AsyncOpenAI(**kwargs)
+        self._system_prompt: str = ""
+        self._reasoning_supported: bool = True
 
     @property
     def context_window(self) -> int | None:
@@ -91,43 +92,43 @@ class OpenAIProvider(ProviderClient):
     def format_tools(self, tools: list[ToolSpec]) -> list[dict]:
         return [_format_tool(t) for t in tools]
 
-    def build_initial_messages(self, system_prompt: str, user_prompt: str) -> list[dict]:
+    def build_initial_messages(self, system_prompt: str, user_prompt: str) -> list[Any]:
+        self._system_prompt = system_prompt
         return [
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
     async def call(
         self,
-        messages: list[dict],
+        messages: list[Any],
         tools: list[dict],
         max_tokens: int = 16384,
         effort: str | None = None,
     ) -> LLMResponse:
-        # Newer OpenAI models (gpt-5.x, o-series) require max_completion_tokens
-        uses_completion_tokens = any(self.model.startswith(p) for p in ("gpt-5", "o3", "o4", "o1"))
-        token_key = "max_completion_tokens" if uses_completion_tokens else "max_tokens"
         kwargs: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
-            token_key: max_tokens,
+            "input": messages,
+            "instructions": self._system_prompt,
         }
         if tools:
             kwargs["tools"] = tools
-        if effort:
-            mapped = "xhigh" if effort == "max" else effort
-            kwargs["reasoning_effort"] = mapped
-            # Also send OpenRouter's unified reasoning format via extra_body.
-            # Direct OpenAI ignores extra_body fields it doesn't recognize.
-            kwargs["extra_body"] = {"reasoning": {"effort": mapped}}
+        if effort and self._reasoning_supported:
+            mapped = "high" if effort == "max" else effort
+            kwargs["reasoning"] = {"effort": mapped}
 
         last_err: Exception | None = None
         for attempt in range(5):
             try:
-                response = await self._client.chat.completions.create(**kwargs)
+                response = await self._client.responses.create(**kwargs)
             except openai.BadRequestError as e:
                 err_msg = str(e).lower()
-                if "context length" in err_msg or "maximum" in err_msg and "token" in err_msg:
+                if "reasoning" in err_msg and "not supported" in err_msg:
+                    # Model doesn't support reasoning — retry without it
+                    self._reasoning_supported = False
+                    kwargs.pop("reasoning", None)
+                    print(f"\n⚠  WARNING: {self.model} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+                    continue
+                if "context length" in err_msg or ("maximum" in err_msg and "token" in err_msg):
                     return LLMResponse(raw_message=None, context_overflow=True)
                 raise
             except (openai.RateLimitError, openai.APITimeoutError, openai.InternalServerError) as e:
@@ -137,10 +138,10 @@ class OpenAIProvider(ProviderClient):
                 await asyncio.sleep(wait)
                 continue
 
-            if not response.choices:
-                last_err = RuntimeError("LLM returned empty choices")
+            if not response.output:
+                last_err = RuntimeError("LLM returned empty output")
                 wait = min(2 ** attempt, 60)
-                print(f"[resum/openai] Retry {attempt + 1}/5: response.choices is None/empty, waiting {wait}s", file=sys.stderr)
+                print(f"[resum/openai] Retry {attempt + 1}/5: response.output is empty, waiting {wait}s", file=sys.stderr)
                 await asyncio.sleep(wait)
                 continue
 
@@ -148,95 +149,99 @@ class OpenAIProvider(ProviderClient):
         else:
             raise last_err  # type: ignore[misc]
 
-        choice = response.choices[0]
-        msg = choice.message
-
+        # Parse output items
         tool_calls = []
-        if msg.tool_calls:
-            for tc in msg.tool_calls:
+        text_parts = []
+        reasoning_parts = []
+
+        for item in response.output:
+            item_type = getattr(item, "type", None)
+            if item_type == "function_call":
                 try:
-                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    args = json.loads(item.arguments) if item.arguments else {}
                 except json.JSONDecodeError:
                     args = {}
                 tool_calls.append(ToolCallInfo(
-                    id=tc.id,
-                    name=tc.function.name,
+                    id=item.call_id,
+                    name=item.name,
                     arguments=args,
                 ))
-
-        # Extract reasoning content from model_extra (OpenRouter returns this
-        # for models with thinking/reasoning, e.g. Gemini, DeepSeek-R1, Grok).
-        reasoning_content = None
-        if hasattr(msg, "model_extra") and msg.model_extra:
-            reasoning_content = (
-                msg.model_extra.get("reasoning")
-                or msg.model_extra.get("reasoning_content")
-            )
+            elif item_type == "message":
+                for content_block in getattr(item, "content", None) or []:
+                    block_type = getattr(content_block, "type", None)
+                    if block_type == "output_text":
+                        text_parts.append(content_block.text)
+            elif item_type == "reasoning":
+                for content_block in getattr(item, "content", None) or []:
+                    block_type = getattr(content_block, "type", None)
+                    if block_type == "reasoning_text":
+                        reasoning_parts.append(content_block.text)
 
         return LLMResponse(
-            raw_message=msg,
+            raw_message=response,
             tool_calls=tool_calls,
-            text_content=msg.content,
-            reasoning_content=reasoning_content,
-            input_tokens=response.usage.prompt_tokens if response.usage else None,
-            output_tokens=response.usage.completion_tokens if response.usage else None,
+            text_content="\n".join(text_parts) if text_parts else None,
+            reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
+            input_tokens=response.usage.input_tokens if response.usage else None,
+            output_tokens=response.usage.output_tokens if response.usage else None,
         )
 
-    def append_assistant(self, messages: list[dict], response: LLMResponse) -> None:
-        msg = response.raw_message
-        entry: dict[str, Any] = {"role": "assistant"}
-        if msg.content:
-            entry["content"] = msg.content
-        if msg.tool_calls:
-            entry["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in msg.tool_calls
-            ]
-        messages.append(entry)
+    def append_assistant(self, messages: list[Any], response: LLMResponse) -> None:
+        """Append output items as serializable dicts for caching/compaction."""
+        raw = response.raw_message
+
+        for item in raw.output:
+            item_type = getattr(item, "type", None)
+            if item_type == "function_call":
+                messages.append({
+                    "type": "function_call",
+                    "call_id": item.call_id,
+                    "name": item.name,
+                    "arguments": item.arguments,
+                })
+            elif item_type == "message":
+                text = ""
+                for cb in getattr(item, "content", []):
+                    if getattr(cb, "type", None) == "output_text":
+                        text += cb.text
+                if text:
+                    messages.append({"role": "assistant", "content": text})
 
     def append_tool_result(
         self,
-        messages: list[dict],
+        messages: list[Any],
         call_id: str,
         tool_name: str,
         output: str,
     ) -> None:
         messages.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": output,
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
         })
 
-    def append_user_message(self, messages: list[dict], content: str) -> None:
+    def append_user_message(self, messages: list[Any], content: str) -> None:
         messages.append({"role": "user", "content": content})
 
-    def messages_to_text(self, messages: list[dict]) -> str:
+    def messages_to_text(self, messages: list[Any]) -> str:
         parts = []
         for msg in messages:
-            role = msg.get("role", "unknown").upper()
-            content = msg.get("content", "")
-            if role == "ASSISTANT":
-                pieces = []
-                if content:
-                    pieces.append(content)
-                for tc in msg.get("tool_calls", []):
-                    func = tc.get("function", {})
-                    pieces.append(f"[Tool Call] {func.get('name', '')}({func.get('arguments', '{}')})")
-                parts.append(f"ASSISTANT: {' '.join(pieces)}")
-            elif role == "TOOL":
-                tool_content = content
-                if len(tool_content) > 1000:
-                    tool_content = tool_content[:500] + "\n... [truncated] ...\n" + tool_content[-500:]
-                parts.append(f"TOOL OUTPUT [{msg.get('tool_call_id', '')}]: {tool_content}")
-            else:
-                parts.append(f"{role}: {content}")
+            if not isinstance(msg, dict):
+                continue
+            msg_type = msg.get("type")
+            role = msg.get("role", "").upper()
+
+            if msg_type == "function_call":
+                parts.append(f"ASSISTANT: [Tool Call] {msg.get('name', '')}({msg.get('arguments', '{}')})")
+            elif msg_type == "function_call_output":
+                output = msg.get("output", "")
+                if len(output) > 1000:
+                    output = output[:500] + "\n... [truncated] ...\n" + output[-500:]
+                parts.append(f"TOOL OUTPUT [{msg.get('call_id', '')}]: {output}")
+            elif role == "ASSISTANT":
+                parts.append(f"ASSISTANT: {msg.get('content', '')}")
+            elif role:
+                parts.append(f"{role}: {msg.get('content', '')}")
         return "\n\n".join(parts)
 
     def rebuild_after_compaction(
@@ -244,9 +249,9 @@ class OpenAIProvider(ProviderClient):
         system_prompt: str,
         original_prompt: str,
         summary: str,
-    ) -> list[dict]:
+    ) -> list[Any]:
+        self._system_prompt = system_prompt
         return [
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": original_prompt},
             {"role": "user", "content": f"[COMPACTED CONVERSATION SUMMARY]\n\n{summary}\n\nPlease continue working on the task based on the summary above. Resume from where you left off."},
         ]
@@ -257,16 +262,15 @@ class OpenAIProvider(ProviderClient):
         compaction_prompt: str,
         max_tokens: int,
     ) -> str:
-        messages = [
-            {"role": "user", "content": f"Here is the conversation history:\n\n{conversation_text}\n\n{compaction_prompt}"},
-        ]
-        uses_completion_tokens = any(self.model.startswith(p) for p in ("gpt-5", "o3", "o4", "o1"))
-        token_key = "max_completion_tokens" if uses_completion_tokens else "max_tokens"
-        response = await self._client.chat.completions.create(
+        response = await self._client.responses.create(
             model=self.model,
-            messages=messages,
-            **{token_key: max_tokens},
+            input=[
+                {"role": "user", "content": f"Here is the conversation history:\n\n{conversation_text}\n\n{compaction_prompt}"},
+            ],
         )
-        if not response.choices:
-            return ""
-        return response.choices[0].message.content or ""
+        for item in response.output:
+            if getattr(item, "type", None) == "message":
+                for cb in getattr(item, "content", []):
+                    if getattr(cb, "type", None) == "output_text":
+                        return cb.text
+        return ""
