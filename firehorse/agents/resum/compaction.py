@@ -116,19 +116,34 @@ def micro_compact(messages: list[Any], provider_name: str, protect_last_n: int =
 
 
 def _micro_compact_openai(messages: list[Any], protect_last_n: int) -> tuple[list[Any], int]:
-    """Micro-compact for OpenAI/OpenRouter dict-based messages."""
+    """Micro-compact for OpenAI/OpenRouter dict-based messages.
+
+    Handles both Chat Completions format (role=tool) and Responses API
+    format (type=function_call_output).
+    """
     # Find all tool result message indices
-    tool_indices = [
-        i for i, m in enumerate(messages)
-        if isinstance(m, dict) and m.get("role") == "tool"
-        and m.get("content") != MICRO_COMPACT_PLACEHOLDER
-    ]
+    tool_indices = []
+    for i, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
+        # Chat Completions format (OpenRouter)
+        if (m.get("role") == "tool"
+                and m.get("content") != MICRO_COMPACT_PLACEHOLDER):
+            tool_indices.append(i)
+        # Responses API format (OpenAI)
+        elif (m.get("type") == "function_call_output"
+                and m.get("output") != MICRO_COMPACT_PLACEHOLDER):
+            tool_indices.append(i)
+
     if len(tool_indices) <= protect_last_n:
         return messages, 0
 
     to_clear = tool_indices[:-protect_last_n]
     for i in to_clear:
-        messages[i] = {**messages[i], "content": MICRO_COMPACT_PLACEHOLDER}
+        if messages[i].get("type") == "function_call_output":
+            messages[i] = {**messages[i], "output": MICRO_COMPACT_PLACEHOLDER}
+        else:
+            messages[i] = {**messages[i], "content": MICRO_COMPACT_PLACEHOLDER}
     return messages, len(to_clear)
 
 
