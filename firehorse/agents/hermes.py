@@ -121,10 +121,10 @@ def _log_hermes_from_export(
             content = msg.get("content") or ""
 
             if reasoning:
-                rollout.log(ReasoningItem(content=reasoning[:10000]))
+                rollout.log(ReasoningItem(content=reasoning))
 
             if content:
-                rollout.log(AssistantMessage(content=content[:10000]))
+                rollout.log(AssistantMessage(content=content))
 
             # Log tool calls embedded in the assistant message
             # Hermes DB stores tool_calls as [{"name": ..., "arguments": ...}]
@@ -148,7 +148,7 @@ def _log_hermes_from_export(
         elif role == "tool":
             content = msg.get("content") or ""
             call_id = msg.get("tool_call_id") or ""
-            content_str = str(content)[:10000]
+            content_str = str(content)
 
             # Try to match with sidecar for reward/finished
             reward = None

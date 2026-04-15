@@ -45,7 +45,7 @@ class GoogleProvider(ProviderClient):
         if genai is None or types is None:
             raise ImportError(
                 "google-genai package required for Google provider. "
-                "Install with: pip install 'firehorse-cli[resum]'"
+                "Install with: pip install google-genai"
             )
         self.model = model
         self._context_window_override = context_window

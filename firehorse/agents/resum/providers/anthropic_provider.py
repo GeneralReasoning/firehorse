@@ -46,7 +46,7 @@ class AnthropicProvider(ProviderClient):
         if anthropic is None:
             raise ImportError(
                 "anthropic package required for Anthropic provider. "
-                "Install with: pip install 'firehorse-cli[resum]'"
+                "Install with: pip install anthropic"
             )
         self.model = model
         self._context_window_override = context_window

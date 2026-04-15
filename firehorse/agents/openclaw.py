@@ -119,7 +119,7 @@ def _log_openclaw_from_session(
             content_blocks = msg.get("content", [])
             if isinstance(content_blocks, str):
                 # Simple text content
-                rollout.log(AssistantMessage(content=content_blocks[:10000]))
+                rollout.log(AssistantMessage(content=content_blocks))
                 continue
 
             for block in content_blocks:
@@ -130,12 +130,12 @@ def _log_openclaw_from_session(
                 if btype == "thinking":
                     thinking = block.get("thinking", "")
                     if thinking:
-                        rollout.log(ReasoningItem(content=thinking[:10000]))
+                        rollout.log(ReasoningItem(content=thinking))
 
                 elif btype == "text":
                     text = block.get("text", "")
                     if text:
-                        rollout.log(AssistantMessage(content=text[:10000]))
+                        rollout.log(AssistantMessage(content=text))
 
                 elif btype == "toolCall":
                     call_id = block.get("id", "")
@@ -155,9 +155,9 @@ def _log_openclaw_from_session(
                 for block in content_blocks:
                     if isinstance(block, dict) and block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
-                content_str = "\n".join(text_parts)[:10000]
+                content_str = "\n".join(text_parts)
             else:
-                content_str = str(content_blocks)[:10000]
+                content_str = str(content_blocks)
 
             # Match with sidecar for reward/finished
             reward = None

@@ -370,13 +370,13 @@ class ReSumAgent(BaseAgent):
         self._log_jsonl(log_file, {
             "type": "tool_result",
             "tool_call_id": call_id,
-            "output": output[:10000],
+            "output": output,
             "reward": reward,
             "finished": finished,
         })
         if rollout:
             rollout.log(
-                ToolResult(content=output[:10000], call_id=call_id),
+                ToolResult(content=output, call_id=call_id),
                 reward=reward,
                 is_finished=finished,
             )
@@ -398,7 +398,7 @@ class ReSumAgent(BaseAgent):
             "success": cr.success,
             "original_message_count": cr.original_message_count,
             "new_message_count": len(cr.new_messages),
-            "summary": cr.summary[:20000] if cr.summary else None,
+            "summary": cr.summary if cr.summary else None,
             "proactive": proactive,
         })
 
@@ -431,7 +431,7 @@ class ReSumAgent(BaseAgent):
             # ToolResult with the summary or prune info
             if cr.success and cr.summary:
                 rollout.log(ToolResult(
-                    content=cr.summary[:10000],
+                    content=cr.summary,
                     call_id=compact_call_id,
                 ))
             else:

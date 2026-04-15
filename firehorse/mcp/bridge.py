@@ -187,7 +187,7 @@ class OpenRewardBridge:
         if self._toolcalls_file:
             result_text = "\n".join(
                 c.text for c in contents if hasattr(c, "text")
-            )[:10000]
+            )
             tc_event = {
                 "call_id": f"call_{self.call_count}",
                 "tool": name,

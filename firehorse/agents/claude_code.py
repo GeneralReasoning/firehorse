@@ -239,8 +239,11 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
                     try:
                         decoded = json.loads(base64.b64decode(data.split(":", 1)[1]))
                         content = decoded.get("text", content)
-                    except (ValueError, json.JSONDecodeError):
-                        pass
+                    except (ValueError, json.JSONDecodeError) as e:
+                        print(
+                            f"[claude_code] Failed to decode openrouter.reasoning payload: {e}",
+                            file=sys.stderr,
+                        )
                 if content:
                     rollout.log(ReasoningItem(content=content))
             elif btype == "tool_use":
@@ -257,7 +260,7 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
                     content = "\n".join(
                         b.get("text", "") for b in content if isinstance(b, dict)
                     )
-                content_str = str(content)[:10000]
+                content_str = str(content)
 
                 # Extract reward/finished from [OR_REWARD:{"r":...,"f":...}] tag
                 reward = None
