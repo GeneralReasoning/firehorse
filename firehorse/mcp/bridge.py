@@ -28,6 +28,8 @@ from openreward.api.environments.types import (
     ToolCallError,
     ToolSpec,
 )
+from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS
+from firehorse.mcp.codex_descriptions import CODEX_DESCRIPTIONS
 from firehorse.mcp.convert import toolspec_to_mcp, tooloutput_to_mcp
 
 
@@ -41,6 +43,7 @@ class OpenRewardBridge:
         self._rewards_file: Any = None  # file handle for rewards sidecar
 
         self._toolset_name: str | None = None
+        self._toolcalls_file: Any = None  # file handle for tool-call log
         self.tools: list[ToolSpec] = []
         self.finished = False
         self.last_reward: float | None = None
@@ -103,8 +106,11 @@ class OpenRewardBridge:
                 if self._session_entered:
                     try:
                         await self._session.__aexit__(None, None, None)
-                    except Exception:
-                        pass
+                    except Exception as cleanup_err:
+                        print(
+                            f"[openreward-bridge] Session cleanup failed during retry: {cleanup_err}",
+                            file=sys.stderr,
+                        )
                     self._session_entered = False
                 await asyncio.sleep(delay)
 
@@ -122,6 +128,11 @@ class OpenRewardBridge:
         if rewards_path:
             self._rewards_file = open(rewards_path, "w")
 
+        # Open tool-call log JSONL (records name, arguments, result for rollout)
+        toolcalls_path = os.environ.get("OPENREWARD_TOOLCALLS_FILE")
+        if toolcalls_path:
+            self._toolcalls_file = open(toolcalls_path, "w")
+
         print(f"[openreward-bridge] Session created, {len(self.tools)} tools available", file=sys.stderr)
 
     async def _list_tools(self) -> list[Tool]:
@@ -132,10 +143,8 @@ class OpenRewardBridge:
         # Legacy path: manual description overrides when no toolset is used
         variant = os.environ.get("OPENREWARD_TOOL_DESCRIPTIONS", "claude")
         if variant == "claude":
-            from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS
             descs = BUILTIN_DESCRIPTIONS
         elif variant == "codex":
-            from firehorse.mcp.codex_descriptions import CODEX_DESCRIPTIONS
             descs = CODEX_DESCRIPTIONS
         else:
             # "env" or any other value: use environment's original descriptions
@@ -173,6 +182,22 @@ class OpenRewardBridge:
 
         self.call_count += 1
         contents = tooloutput_to_mcp(output)
+
+        # Write tool call + result to sidecar log for rollout reconstruction
+        if self._toolcalls_file:
+            result_text = "\n".join(
+                c.text for c in contents if hasattr(c, "text")
+            )
+            tc_event = {
+                "call_id": f"call_{self.call_count}",
+                "tool": name,
+                "arguments": arguments,
+                "result": result_text,
+                "reward": output.reward,
+                "finished": output.finished,
+            }
+            self._toolcalls_file.write(json.dumps(tc_event) + "\n")
+            self._toolcalls_file.flush()
 
         if output.reward is not None:
             self.total_reward += output.reward

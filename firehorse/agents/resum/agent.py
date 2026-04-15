@@ -7,6 +7,15 @@ import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
+from openreward import (
+    AssistantMessage,
+    ReasoningItem,
+    SystemMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+
 from firehorse.agents.base import AgentResult, BaseAgent, TrialContext
 from firehorse.agents.resum.compaction import CompactionResult, compact_conversation, micro_compact, should_compact_proactively
 from firehorse.agents.resum.providers import get_provider, parse_provider, resolve_api_key
@@ -330,14 +339,10 @@ class ReSumAgent(BaseAgent):
 
         # Rollout
         if rollout:
-            try:
-                from openreward import AssistantMessage, ReasoningItem
-                if response.reasoning_content:
-                    rollout.log(ReasoningItem(content=response.reasoning_content))
-                if response.text_content:
-                    rollout.log(AssistantMessage(content=response.text_content))
-            except Exception:
-                pass
+            if response.reasoning_content:
+                rollout.log(ReasoningItem(content=response.reasoning_content))
+            if response.text_content:
+                rollout.log(AssistantMessage(content=response.text_content))
 
     def _log_tool_call(self, log_file: Any, rollout: Any, tc: Any) -> None:
         self._log_jsonl(log_file, {
@@ -347,15 +352,11 @@ class ReSumAgent(BaseAgent):
             "arguments": tc.arguments,
         })
         if rollout:
-            try:
-                from openreward import ToolCall
-                rollout.log(ToolCall(
-                    name=tc.name,
-                    content=json.dumps(tc.arguments),
-                    call_id=tc.id,
-                ))
-            except Exception:
-                pass
+            rollout.log(ToolCall(
+                name=tc.name,
+                content=json.dumps(tc.arguments),
+                call_id=tc.id,
+            ))
 
     def _log_tool_result(
         self,
@@ -369,20 +370,16 @@ class ReSumAgent(BaseAgent):
         self._log_jsonl(log_file, {
             "type": "tool_result",
             "tool_call_id": call_id,
-            "output": output[:10000],
+            "output": output,
             "reward": reward,
             "finished": finished,
         })
         if rollout:
-            try:
-                from openreward import ToolResult
-                rollout.log(
-                    ToolResult(content=output[:10000], call_id=call_id),
-                    reward=reward,
-                    is_finished=finished,
-                )
-            except Exception:
-                pass
+            rollout.log(
+                ToolResult(content=output, call_id=call_id),
+                reward=reward,
+                is_finished=finished,
+            )
 
     def _log_compaction(
         self,
@@ -401,64 +398,56 @@ class ReSumAgent(BaseAgent):
             "success": cr.success,
             "original_message_count": cr.original_message_count,
             "new_message_count": len(cr.new_messages),
-            "summary": cr.summary[:20000] if cr.summary else None,
+            "summary": cr.summary if cr.summary else None,
             "proactive": proactive,
         })
 
         # Rollout — log as SystemMessage + ToolCall("compact") + ToolResult
         if rollout:
-            try:
-                from openreward import SystemMessage, ToolCall, ToolResult
-                trigger = "proactive" if proactive else "reactive"
-                compact_call_id = f"compact_{compaction_count}"
+            trigger = "proactive" if proactive else "reactive"
+            compact_call_id = f"compact_{compaction_count}"
 
-                # System message announcing compaction
-                rollout.log(SystemMessage(
-                    content=(
-                        f"Context compaction triggered ({trigger}). "
-                        f"Method: {cr.method}. "
-                        f"Messages: {cr.original_message_count} -> {len(cr.new_messages)}."
-                    ),
+            # System message announcing compaction
+            rollout.log(SystemMessage(
+                content=(
+                    f"Context compaction triggered ({trigger}). "
+                    f"Method: {cr.method}. "
+                    f"Messages: {cr.original_message_count} -> {len(cr.new_messages)}."
+                ),
+            ))
+
+            # ToolCall representing the compaction operation
+            rollout.log(ToolCall(
+                name="compact",
+                content=json.dumps({
+                    "method": cr.method,
+                    "trigger": trigger,
+                    "compaction_count": compaction_count,
+                    "original_message_count": cr.original_message_count,
+                }),
+                call_id=compact_call_id,
+            ))
+
+            # ToolResult with the summary or prune info
+            if cr.success and cr.summary:
+                rollout.log(ToolResult(
+                    content=cr.summary,
+                    call_id=compact_call_id,
                 ))
-
-                # ToolCall representing the compaction operation
-                rollout.log(ToolCall(
-                    name="compact",
-                    content=json.dumps({
-                        "method": cr.method,
-                        "trigger": trigger,
-                        "compaction_count": compaction_count,
-                        "original_message_count": cr.original_message_count,
-                    }),
+            else:
+                rollout.log(ToolResult(
+                    content=(
+                        f"Compaction {'succeeded' if cr.success else 'failed'}. "
+                        f"Fell back to {cr.method}. "
+                        f"Kept {len(cr.new_messages)} messages."
+                    ),
                     call_id=compact_call_id,
                 ))
 
-                # ToolResult with the summary or prune info
-                if cr.success and cr.summary:
-                    rollout.log(ToolResult(
-                        content=cr.summary[:10000],
-                        call_id=compact_call_id,
-                    ))
-                else:
-                    rollout.log(ToolResult(
-                        content=(
-                            f"Compaction {'succeeded' if cr.success else 'failed'}. "
-                            f"Fell back to {cr.method}. "
-                            f"Kept {len(cr.new_messages)} messages."
-                        ),
-                        call_id=compact_call_id,
-                    ))
-            except Exception:
-                pass
-
     def _log_rollout_system_and_prompt(self, rollout: Any, system_prompt: str, user_prompt: str) -> None:
         if rollout:
-            try:
-                from openreward import SystemMessage, UserMessage
-                rollout.log(SystemMessage(content=system_prompt))
-                rollout.log(UserMessage(content=user_prompt))
-            except Exception:
-                pass
+            rollout.log(SystemMessage(content=system_prompt))
+            rollout.log(UserMessage(content=user_prompt))
 
     def _log_summary(
         self,
@@ -487,7 +476,4 @@ class ReSumAgent(BaseAgent):
 
     def _close_log(self, log_file: Any) -> None:
         if log_file:
-            try:
-                log_file.close()
-            except Exception:
-                pass
+            log_file.close()

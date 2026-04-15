@@ -5,6 +5,13 @@ import json
 import sys
 from typing import Any, TYPE_CHECKING
 
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
+from openreward.api.environments.client import _strip_titles
+
 from firehorse.agents.resum.providers.base import (
     LLMResponse,
     ProviderClient,
@@ -24,7 +31,6 @@ KNOWN_CONTEXT_WINDOWS = {
 
 
 def _format_tool(tool: ToolSpec) -> dict:
-    from openreward.api.environments.client import _strip_titles
     schema = _strip_titles(dict(tool.input_schema)) if tool.input_schema else {"type": "object", "properties": {}}
     return {
         "name": tool.name,
@@ -37,12 +43,10 @@ class AnthropicProvider(ProviderClient):
     """Anthropic Messages API provider."""
 
     def __init__(self, model: str, api_key: str, context_window: int | None = None):
-        try:
-            import anthropic
-        except ImportError:
+        if anthropic is None:
             raise ImportError(
                 "anthropic package required for Anthropic provider. "
-                "Install with: pip install 'firehorse[resum]'"
+                "Install with: pip install anthropic"
             )
         self.model = model
         self._context_window_override = context_window
@@ -72,8 +76,6 @@ class AnthropicProvider(ProviderClient):
         max_tokens: int = 16384,
         effort: str | None = None,
     ) -> LLMResponse:
-        import anthropic as anthropic_mod
-
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -91,12 +93,12 @@ class AnthropicProvider(ProviderClient):
             try:
                 response = await self._client.messages.create(**kwargs)
                 break
-            except anthropic_mod.BadRequestError as e:
+            except anthropic.BadRequestError as e:
                 err_msg = str(e).lower()
                 if "too long" in err_msg or "context" in err_msg or "token" in err_msg:
                     return LLMResponse(raw_message=None, context_overflow=True)
                 raise
-            except (anthropic_mod.RateLimitError, anthropic_mod.APITimeoutError, anthropic_mod.InternalServerError) as e:
+            except (anthropic.RateLimitError, anthropic.APITimeoutError, anthropic.InternalServerError) as e:
                 last_err = e
                 wait = min(2 ** attempt, 60)
                 print(f"[resum/anthropic] Retry {attempt + 1}/5 after {type(e).__name__}, waiting {wait}s", file=sys.stderr)

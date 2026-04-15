@@ -58,7 +58,9 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
     env = client.environments.get(config.env)
 
     # List tasks
+    print(f"Listing tasks for {config.env} ({config.split} split)...", file=sys.stderr)
     tasks = await env.list_tasks(config.split)
+    print(f"Found {len(tasks)} tasks", file=sys.stderr)
     if config.skip_tasks:
         tasks = tasks[config.skip_tasks:]
     if config.max_tasks is not None:
@@ -80,26 +82,17 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # Auto-detect required secrets from env vars
     secrets = dict(config.secrets)
-    try:
-        required = await env.list_required_secrets()
-        for key in required:
-            if key not in secrets:
-                # Try uppercase env var (e.g. openai_api_key -> OPENAI_API_KEY)
-                env_var = key.upper()
-                val = os.environ.get(env_var, "")
-                if val:
-                    secrets[key] = val
-                    print(f"Auto-detected secret: {key} (from ${env_var})", file=sys.stderr)
-                else:
-                    print(f"Warning: required secret '{key}' not found in env vars", file=sys.stderr)
-    except Exception as e:
-        # list_required_secrets may not be available; fall back to well-known keys
-        for key, env_var in [("openai_api_key", "OPENAI_API_KEY"), ("anthropic_api_key", "ANTHROPIC_API_KEY")]:
-            if key not in secrets:
-                val = os.environ.get(env_var, "")
-                if val:
-                    secrets[key] = val
-                    print(f"Auto-detected secret: {key} (from ${env_var})", file=sys.stderr)
+    required = await env.list_required_secrets()
+    for key in required:
+        if key not in secrets:
+            # Try uppercase env var (e.g. openai_api_key -> OPENAI_API_KEY)
+            env_var = key.upper()
+            val = os.environ.get(env_var, "")
+            if val:
+                secrets[key] = val
+                print(f"Auto-detected secret: {key} (from ${env_var})", file=sys.stderr)
+            else:
+                print(f"Warning: required secret '{key}' not found in env vars", file=sys.stderr)
 
     # Fetch tools for the banner
     tools = await env.list_tools()
@@ -146,7 +139,6 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
                 plan_mode=config.plan_mode,
-                toolset_name=config.toolset_name or (config.agent if config.agent in ("claude-code", "codex") else None),
             )
             result = await run_trial(
                 env, task, agent, trial_config,
@@ -175,6 +167,10 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
         *[run_with_semaphore(t, i) for i, t in enumerate(tasks)],
         return_exceptions=True,
     )
+
+    # Flush pending rollout uploads before the event loop shuts down.
+    if config.logging:
+        client.rollout.close()
 
     summary = RunSummary.from_results(
         results,

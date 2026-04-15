@@ -12,6 +12,7 @@ WebSocket upgrade requests are rejected instantly (not absorbed by a framework).
 from __future__ import annotations
 
 import asyncio
+import ssl
 import sys
 from typing import Any
 
@@ -31,7 +32,6 @@ class OpenRouterProxy:
         return f"http://127.0.0.1:{self.port}"
 
     async def start(self) -> None:
-        import ssl
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
@@ -69,7 +69,7 @@ class OpenRouterProxy:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except (ConnectionError, OSError):
                 pass
 
     async def _process_request(

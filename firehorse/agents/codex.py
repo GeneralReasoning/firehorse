@@ -10,6 +10,16 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openreward import (
+    AssistantMessage,
+    ReasoningItem,
+    SystemMessage,
+    ToolCall,
+    ToolResult,
+    UserMessage,
+)
+
+from firehorse.agents._openrouter_proxy import OpenRouterProxy
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
 # Env tools with these names are always excluded from MCP —
@@ -193,10 +203,6 @@ def _extract_mcp_text(result_data: Any) -> str:
 
 def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
     """Parse a Codex stream-json event and log it to an OpenReward rollout."""
-    from openreward import (
-        AssistantMessage, ReasoningItem, ToolCall, ToolResult,
-    )
-
     # v0.39: {"id":"0","msg":{"type":"...",...}}
     # v0.118: {"type":"...",...}  (flat structure)
     msg = event.get("msg")
@@ -357,7 +363,6 @@ class CodexAgent(BaseAgent):
             proxy = None
             proxy_api_key = extra_env.pop("_PROXY_API_KEY", None)
             if proxy_target and proxy_api_key:
-                from firehorse.agents._openrouter_proxy import OpenRouterProxy
                 proxy = OpenRouterProxy(api_key=proxy_api_key, target_base=proxy_target)
                 await proxy.start()
                 print(
@@ -450,12 +455,8 @@ class CodexAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                from openreward import SystemMessage, UserMessage
-                try:
-                    main_rollout.log(SystemMessage(content=system_prompt))
-                    main_rollout.log(UserMessage(content=ctx.prompt_text))
-                except Exception:
-                    pass
+                main_rollout.log(SystemMessage(content=system_prompt))
+                main_rollout.log(UserMessage(content=ctx.prompt_text))
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
@@ -483,10 +484,7 @@ class CodexAgent(BaseAgent):
 
                     # Log to OpenReward rollout
                     if main_rollout:
-                        try:
-                            _log_codex_event_to_rollout(event, main_rollout)
-                        except Exception:
-                            pass  # Don't let logging failures break the agent
+                        _log_codex_event_to_rollout(event, main_rollout)
 
                     # Track token usage from token_count events
                     # Support both v0.39 (nested msg) and v0.118 (flat) formats

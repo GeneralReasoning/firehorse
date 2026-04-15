@@ -35,9 +35,13 @@ async def run_trial(
 ) -> TrialResult:
     start = time.monotonic()
 
+    # claude-code and codex have matching SDK toolsets that provide their
+    # built-in tool descriptions; other agents use their own native tools.
+    toolset_name = agent.name if agent.name in ("claude-code", "codex") else None
+
     try:
         session_secrets = config.secrets or None
-        async with env.session(task, secrets=session_secrets, toolset=config.toolset_name) as session:
+        async with env.session(task, secrets=session_secrets, toolset=toolset_name) as session:
             prompt_blocks = await session.get_prompt()
             tools = await session.list_tools()
 
@@ -67,7 +71,7 @@ async def run_trial(
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
                 plan_mode=config.plan_mode,
-                toolset_name=config.toolset_name,
+                toolset_name=toolset_name,
                 rollout_client=rollout_client,
             )
 
