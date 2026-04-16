@@ -93,6 +93,13 @@ firehorse \
   --agent codex \
   --model openrouter/z-ai/glm-5.1 \
   --output-dir ./results
+
+# Pick a specific variant of a multi-variant environment
+firehorse \
+  --env GeneralReasoning/MATH \
+  --variant mathnocode \
+  --agent react \
+  --model anthropic/claude-sonnet-4-6
 ```
 
 ## Agent Types
@@ -185,6 +192,7 @@ Required:
 
 Options:
   --agent            Agent type: claude-code, codex, hermes, openclaw, react, resum (default: claude-code)
+  --variant          Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH)
   --split            Task split to evaluate (default: test)
   --n-concurrent     Max parallel trials (default: 1)
   --max-tasks        Limit number of tasks to evaluate

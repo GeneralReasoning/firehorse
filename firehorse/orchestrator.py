@@ -23,7 +23,8 @@ def _print_banner(
     n_tasks: int,
     tools: list[ToolSpec],
 ) -> None:
-    print(f"\nOpenReward Run: {config.env} ({config.split} split, {n_tasks} tasks)", file=sys.stderr)
+    variant_suffix = f" variant={config.variant}" if config.variant else ""
+    print(f"\nOpenReward Run: {config.env}{variant_suffix} ({config.split} split, {n_tasks} tasks)", file=sys.stderr)
     print(f"Agent: {config.agent} | Model: {config.model}", file=sys.stderr)
     print(f"Concurrency: {config.n_concurrent}", file=sys.stderr)
 
@@ -64,7 +65,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
         raise SystemExit(1)
 
     client = AsyncOpenReward()
-    env = client.environments.get(config.env)
+    env = client.environments.get(config.env, variant=config.variant)
 
     # Count tasks (index-based API — list_tasks is unsupported on some envs)
     print(f"Listing tasks for {config.env} ({config.split} split)...", file=sys.stderr)
@@ -138,6 +139,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 env=config.env,
                 split=config.split,
                 model=config.model,
+                variant=config.variant,
                 max_turns=config.max_turns,
                 provider_url=config.provider_url,
                 disable_builtin_tools=config.disable_builtin_tools,

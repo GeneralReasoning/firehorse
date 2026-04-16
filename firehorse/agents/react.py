@@ -141,6 +141,7 @@ class ReactAgent(BaseAgent):
                     run_name=ctx.run_name,
                     rollout_name=f"trial_{trial_id}",
                     environment=ctx.env_name,
+                    variant=ctx.variant,
                     split=ctx.split,
                     task_spec=ctx.task_spec,
                     metadata={"model": ctx.model, "agent": "react"},

@@ -193,9 +193,11 @@ class TestLogCodexEventToRollout:
         }
         _log_codex_event_to_rollout(event, rollout)
         assert len(rollout.logged) == 1
-        _, kwargs = rollout.logged[0]
+        item, kwargs = rollout.logged[0]
         assert kwargs["reward"] == 1.0
         assert kwargs["is_finished"] is True
+        assert "OR_REWARD" not in item.content
+        assert item.content == "Done"
 
     def test_flat_event_format(self):
         """v0.118 flat event format (no nested msg)."""
