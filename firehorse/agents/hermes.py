@@ -17,6 +17,7 @@ from typing import Any
 
 from openreward import AssistantMessage, ToolCall, ToolResult, UserMessage
 from openreward.api.rollouts.serializers.base import ReasoningItem
+from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.agents._subprocess_common import (
@@ -96,6 +97,7 @@ def _log_hermes_from_export(
     session_data: dict,
     toolcalls_path: Path,
     rollout: Any,
+    final_info: RolloutInfo | None = None,
 ) -> None:
     """Log structured rollout from a Hermes session export.
 
@@ -175,6 +177,7 @@ def _log_hermes_from_export(
                 ToolResult(content=content_str, call_id=call_id),
                 reward=reward,
                 is_finished=is_finished,
+                rollout_info=final_info if is_finished else None,
             )
 
         elif role == "user":
@@ -185,6 +188,7 @@ def _log_hermes_from_export(
 def _log_hermes_rollout_fallback(
     toolcalls_path: Path,
     rollout: Any,
+    final_info: RolloutInfo | None = None,
 ) -> None:
     """Fallback rollout logging using only the sidecar toolcalls JSONL.
 
@@ -197,6 +201,7 @@ def _log_hermes_rollout_fallback(
     for line in toolcalls_path.read_text().strip().splitlines():
         event = json.loads(line)
         call_id = event.get("call_id", "")
+        is_finished = event.get("finished", False)
         rollout.log(ToolCall(
             name=event.get("tool", ""),
             content=json.dumps(event.get("arguments", {})),
@@ -208,7 +213,8 @@ def _log_hermes_rollout_fallback(
                 call_id=call_id,
             ),
             reward=event.get("reward"),
-            is_finished=event.get("finished", False),
+            is_finished=is_finished,
+            rollout_info=final_info if is_finished else None,
         )
 
 
@@ -239,11 +245,7 @@ class HermesAgent(BaseAgent):
         with tempfile.TemporaryDirectory(prefix="orwd-hermes-trial-") as tmpdir:
             tmppath = Path(tmpdir)
             result_file = tmppath / "result.json"
-            trial_id = ctx.task_spec.get(
-                "id", ctx.task_spec.get(
-                    "index", ctx.task_index if ctx.task_index is not None else "unknown",
-                ),
-            )
+            trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
             log_dir = Path(ctx.output_dir) if ctx.output_dir else None
 
             env_tool_names = [t.name for t in ctx.tools]
@@ -362,7 +364,7 @@ class HermesAgent(BaseAgent):
                         environment=ctx.env_name,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"model": ctx.model, "agent": "hermes"},
+                        metadata={},
                     )
                     print(
                         f"[hermes] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}",
@@ -381,7 +383,10 @@ class HermesAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                main_rollout.log(UserMessage(content=full_prompt))
+                main_rollout.log(
+                    UserMessage(content=full_prompt),
+                    rollout_info=RolloutInfo(task_index=ctx.task_index, harness="hermes"),
+                )
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
@@ -453,17 +458,21 @@ class HermesAgent(BaseAgent):
             # Export structured session data for rollout logging.
             if main_rollout:
                 session_id = _extract_session_id(stdout_lines)
+                _final_info = RolloutInfo(
+                    task_index=ctx.task_index,
+                    duration_ms=duration_ms,
+                )
                 if session_id:
                     print(f"[hermes] Exporting session {session_id} for rollout", file=sys.stderr)
                     session_data = await _export_hermes_session(session_id, hermes_home)
                     if session_data:
-                        _log_hermes_from_export(session_data, toolcalls_path, main_rollout)
+                        _log_hermes_from_export(session_data, toolcalls_path, main_rollout, final_info=_final_info)
                     else:
                         print("[hermes] Session export failed, falling back to sidecar", file=sys.stderr)
-                        _log_hermes_rollout_fallback(toolcalls_path, main_rollout)
+                        _log_hermes_rollout_fallback(toolcalls_path, main_rollout, final_info=_final_info)
                 else:
                     print("[hermes] No session ID found in stdout, falling back to sidecar", file=sys.stderr)
-                    _log_hermes_rollout_fallback(toolcalls_path, main_rollout)
+                    _log_hermes_rollout_fallback(toolcalls_path, main_rollout, final_info=_final_info)
 
             if main_log:
                 summary_event = {
