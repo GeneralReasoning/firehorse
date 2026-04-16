@@ -41,7 +41,7 @@ firehorse --env GeneralReasoning/portfolio \
   --effort max
 ```
 
-The `anthropic/` prefix is stripped before passing to `claude --model`. Extended thinking (`--effort`) is only enabled for Anthropic models.
+The `anthropic/` prefix is stripped before passing to `claude --model`. Extended thinking (`--effort`) is only enabled for Anthropic models, and is off by default — omit `--effort` (or pass `--effort none`) to use the Claude CLI's own default.
 
 ### OpenRouter
 
@@ -220,7 +220,7 @@ Options:
   --max-tasks        Limit number of tasks
   --run-name         Custom run name
   --max-turns        Max tool call turns per trial
-  --effort           Thinking effort: low|medium|high|max (default: high, Anthropic only)
+  --effort           Thinking effort: none|low|medium|high|max (default: none — use model default; Anthropic only)
   --provider-url     Custom API base URL for non-Anthropic models
   --disable-builtin-tools  Comma-separated Claude built-in tools to disable
   --no-logging       Disable OpenReward rollout logging

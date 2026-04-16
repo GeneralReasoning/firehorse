@@ -26,7 +26,7 @@ async def command_run(
     disable_builtin_tools: str | None = None,
     secrets: dict[str, str] | None = None,
     output_dir: str | None = None,
-    effort: str = "high",
+    effort: str | None = None,
     logging: bool = True,
     use_env_descriptions: bool = False,
     use_all_filesystem_tools: bool = False,
@@ -77,8 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", default=None, help="Name for this run")
     parser.add_argument("--max-turns", type=int, default=None, help="Max tool call turns per trial")
     parser.add_argument(
-        "--effort", default="high", choices=["low", "medium", "high", "max"],
-        help="Claude thinking effort level (default: high)",
+        "--effort", default=None, choices=["none", "low", "medium", "high", "max"],
+        help="Reasoning/thinking effort passed to the model (default: none — use model's own default)",
     )
     parser.add_argument(
         "--provider-url", default=None,
@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
             disable_builtin_tools=args.disable_builtin_tools,
             secrets=secrets,
             output_dir=args.output_dir,
-            effort=args.effort,
+            effort=None if args.effort in (None, "none") else args.effort,
             logging=not args.no_logging,
             use_env_descriptions=args.use_env_descriptions,
             use_all_filesystem_tools=args.use_all_filesystem_tools,

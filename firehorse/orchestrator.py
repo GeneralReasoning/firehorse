@@ -31,24 +31,29 @@ def _print_banner(
     print(f"Agent: {config.agent} | Model: {config.model}", file=sys.stderr)
     print(f"Concurrency: {config.n_concurrent}", file=sys.stderr)
 
+    # "Replaces built-in X" annotations only make sense for agents that actually
+    # ship Claude Code's built-in tools. Other agents (react, codex, openclaw,
+    # hermes, resum) use the env's native tools directly.
+    is_claude_code = config.agent == "claude-code"
     replaced_builtins = []
     if tools:
         print(f"\nEnvironment tools (via MCP):", file=sys.stderr)
         for t in tools:
-            builtin = ENV_TO_BUILTIN.get(t.name.lower())
             override_note = ""
-            if builtin:
-                override_note = f" (replaces built-in {builtin})"
-                replaced_builtins.append(builtin)
+            if is_claude_code:
+                builtin = ENV_TO_BUILTIN.get(t.name.lower())
+                if builtin:
+                    override_note = f" (replaces built-in {builtin})"
+                    replaced_builtins.append(builtin)
             desc = t.description or ""
             if len(desc) > 80:
                 desc = desc[:77] + "..."
             print(f"  - {t.name}{override_note}: {desc}", file=sys.stderr)
 
-    if replaced_builtins:
-        print(f"\nDisabled built-ins (replaced by env): {', '.join(sorted(replaced_builtins))}", file=sys.stderr)
-
-    print(f"Remaining Claude built-in tools: available (Task, TodoWrite, etc.)", file=sys.stderr)
+    if is_claude_code:
+        if replaced_builtins:
+            print(f"\nDisabled built-ins (replaced by env): {', '.join(sorted(replaced_builtins))}", file=sys.stderr)
+        print(f"Remaining Claude built-in tools: available (Task, TodoWrite, etc.)", file=sys.stderr)
     print(f"\nStarting trials...\n", file=sys.stderr)
 
 

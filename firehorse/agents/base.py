@@ -26,7 +26,7 @@ class TrialContext:
     disable_builtin_tools: list[str] = field(default_factory=list)
     secrets: dict[str, str] = field(default_factory=dict)
     output_dir: str | None = None
-    effort: str = "high"
+    effort: str | None = None
     logging: bool = True
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False  # Codex: expose all filesystem tools via MCP, not just bash

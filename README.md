@@ -146,7 +146,7 @@ Extends the ReAct loop with automatic conversation compaction. When the context 
 
 ## Thinking / Reasoning
 
-The `--effort` flag controls how much thinking/reasoning the model does. It's supported by `claude-code`, `react`, and `resum` agents. The effort level maps to each provider's native thinking mechanism:
+The `--effort` flag controls how much thinking/reasoning the model does. It's supported by `claude-code`, `react`, and `resum` agents. Omitting the flag (or passing `--effort none`) leaves the reasoning parameter unset so each provider uses its own default. The effort level maps to each provider's native thinking mechanism:
 
 | Provider | Mechanism | low | medium | high | max |
 |---|---|---|---|---|---|
@@ -156,7 +156,7 @@ The `--effort` flag controls how much thinking/reasoning the model does. It's su
 | **OpenRouter** | Passes through to underlying provider | — | — | — | — |
 
 ```bash
-# High thinking (default)
+# High thinking (opt-in; default is no effort flag — provider picks its own default)
 firehorse --env GeneralReasoning/portfolio --model anthropic/claude-sonnet-4-6 --effort high
 
 # Max thinking for deep reasoning tasks
@@ -198,7 +198,7 @@ Options:
   --max-tasks        Limit number of tasks to evaluate
   --max-turns        Max tool call turns per trial
   --run-name         Name for this evaluation run
-  --effort           Thinking effort: low, medium, high, max (default: high)
+  --effort           Thinking effort: none, low, medium, high, max (default: none — use model default)
   --provider-url     Custom API base URL for non-standard endpoints
   --output-dir       Directory for JSONL trajectory logs and results
   --secret KEY=VAL   Inject a session secret (repeatable)

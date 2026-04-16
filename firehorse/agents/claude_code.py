@@ -390,8 +390,9 @@ class ClaudeCodeAgent(BaseAgent):
                 "--no-session-persistence",
             ]
 
-            # Only add --effort for Anthropic models (extended thinking is Anthropic-specific)
-            if is_anthropic:
+            # Only add --effort for Anthropic models (extended thinking is Anthropic-specific).
+            # Omitted when ctx.effort is None so the Claude CLI uses its own default.
+            if is_anthropic and ctx.effort:
                 cmd.extend(["--effort", ctx.effort])
 
             if all_disallow:
