@@ -100,6 +100,24 @@ def _jsonl_write(log_file: IO | None, event: dict) -> None:
         log_file.write(json.dumps(event, default=str) + "\n")
 
 
+def _format_openrouter_tool(tool: Any) -> dict:
+    # Worked around here because openreward's built-in format="openrouter"
+    # nests `parameters` outside `function`, which Chat Completions silently
+    # ignores — models then see no schema and emit empty `{}` args.
+    from openreward.api.environments.client import _sanitize_openai_schema, _strip_titles
+
+    schema = dict(tool.input_schema) if getattr(tool, "input_schema", None) else None
+    params = _sanitize_openai_schema(_strip_titles(schema)) if schema else None
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": params or {"type": "object", "properties": {}},
+        },
+    }
+
+
 class ReactAgent(BaseAgent):
 
     @property
@@ -596,7 +614,8 @@ class ReactAgent(BaseAgent):
         base_url = ctx.provider_url or "https://openrouter.ai/api/v1"
         client = AsyncOpenAI(base_url=base_url, api_key=api_key)
 
-        tools = await ctx.session.list_tools(format="openrouter")
+        raw_tools = await ctx.session.list_tools()
+        tools = [_format_openrouter_tool(t) for t in raw_tools]
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": ctx.prompt_text},
@@ -667,10 +686,13 @@ class ReactAgent(BaseAgent):
 
             for tc in msg.tool_calls:
                 turns_used += 1
+                raw_args = tc.function.arguments
                 try:
-                    tr = await ctx.session.call_tool(
-                        tc.function.name, json.loads(tc.function.arguments)
-                    )
+                    args = json.loads(raw_args) if raw_args else {}
+                except json.JSONDecodeError:
+                    args = {}
+                try:
+                    tr = await ctx.session.call_tool(tc.function.name, args)
                     text = _format_tool_output(tr)
                     if tr.finished:
                         finished = True

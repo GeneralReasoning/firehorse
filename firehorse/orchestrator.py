@@ -53,20 +53,28 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
     if config.model.startswith("openrouter/") and not os.environ.get("OPENROUTER_API_KEY"):
         print("Error: OPENROUTER_API_KEY environment variable required for openrouter/ models", file=sys.stderr)
         raise SystemExit(1)
+    if config.model.startswith("anthropic/") and not os.environ.get("ANTHROPIC_API_KEY"):
+        print("Error: ANTHROPIC_API_KEY environment variable required for anthropic/ models", file=sys.stderr)
+        raise SystemExit(1)
+    if config.model.startswith("openai/") and not os.environ.get("OPENAI_API_KEY"):
+        print("Error: OPENAI_API_KEY environment variable required for openai/ models", file=sys.stderr)
+        raise SystemExit(1)
+    if config.model.startswith("google/") and not os.environ.get("GOOGLE_API_KEY") and not os.environ.get("GEMINI_API_KEY"):
+        print("Error: GOOGLE_API_KEY or GEMINI_API_KEY environment variable required for google/ models", file=sys.stderr)
+        raise SystemExit(1)
 
     client = AsyncOpenReward()
     env = client.environments.get(config.env)
 
-    # List tasks
+    # Count tasks (index-based API — list_tasks is unsupported on some envs)
     print(f"Listing tasks for {config.env} ({config.split} split)...", file=sys.stderr)
-    tasks = await env.list_tasks(config.split)
-    print(f"Found {len(tasks)} tasks", file=sys.stderr)
-    if config.skip_tasks:
-        tasks = tasks[config.skip_tasks:]
-    if config.max_tasks is not None:
-        tasks = tasks[: config.max_tasks]
+    total_available = await env.num_tasks(config.split)
+    print(f"Found {total_available} tasks", file=sys.stderr)
+    start = config.skip_tasks or 0
+    stop = total_available if config.max_tasks is None else min(start + config.max_tasks, total_available)
+    indices = list(range(start, stop))
 
-    if not tasks:
+    if not indices:
         print(f"No tasks found for split {config.split!r}", file=sys.stderr)
         return RunSummary(
             run_name=config.effective_run_name(),
@@ -96,7 +104,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # Fetch tools for the banner
     tools = await env.list_tools()
-    _print_banner(config, len(tasks), tools)
+    _print_banner(config, len(indices), tools)
 
     # Setup agent
     agent = get_agent(config.agent)
@@ -113,17 +121,18 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     semaphore = asyncio.Semaphore(config.n_concurrent)
     completed_count = 0
-    total = len(tasks)
+    total = len(indices)
 
-    async def run_with_semaphore(task, idx: int) -> TrialResult:
+    async def run_with_semaphore(abs_index: int, local_idx: int) -> TrialResult:
         nonlocal completed_count
         async with semaphore:
             # Stagger trial starts to avoid thundering herd on MCP/API connections
             if config.n_concurrent > 1:
                 jitter = random.uniform(0, config.n_concurrent * 1.0)
                 await asyncio.sleep(jitter)
+            task = await env.get_task(config.split, abs_index)
             trial_config = TrialConfig(
-                task_index=idx,
+                task_index=local_idx,
                 task_spec=dict(task.task_spec),
                 run_name=run_name,
                 env=config.env,
@@ -155,7 +164,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
             else:
                 status = "FAIL"
             print(
-                f"[{completed_count}/{total}] task={idx} reward={reward_str} {status} "
+                f"[{completed_count}/{total}] task={local_idx} reward={reward_str} {status} "
                 f"({result.duration_seconds:.1f}s)",
                 file=sys.stderr,
             )
@@ -164,7 +173,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
             return result
 
     results = await asyncio.gather(
-        *[run_with_semaphore(t, i) for i, t in enumerate(tasks)],
+        *[run_with_semaphore(abs_i, i) for i, abs_i in enumerate(indices)],
         return_exceptions=True,
     )
 
