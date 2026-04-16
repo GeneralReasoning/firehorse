@@ -18,6 +18,7 @@ from typing import Any
 
 from openreward import AssistantMessage, ToolCall, ToolResult, UserMessage
 from openreward.api.rollouts.serializers.base import ReasoningItem
+from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.agents._subprocess_common import (
@@ -74,6 +75,7 @@ def _log_openclaw_from_session(
     session_jsonl_path: Path,
     toolcalls_path: Path,
     rollout: Any,
+    final_info: RolloutInfo | None = None,
 ) -> None:
     """Log structured rollout from an OpenClaw session transcript JSONL.
 
@@ -88,7 +90,7 @@ def _log_openclaw_from_session(
     """
     if not session_jsonl_path.exists():
         print(f"[openclaw] Session file not found: {session_jsonl_path}", file=sys.stderr)
-        _log_toolcalls_fallback(toolcalls_path, rollout)
+        _log_toolcalls_fallback(toolcalls_path, rollout, final_info=final_info)
         return
 
     # Build sidecar reward lookup
@@ -181,16 +183,18 @@ def _log_openclaw_from_session(
                 ToolResult(content=content_str, call_id=call_id),
                 reward=reward,
                 is_finished=is_finished,
+                rollout_info=final_info if is_finished else None,
             )
 
 
-def _log_toolcalls_fallback(toolcalls_path: Path, rollout: Any) -> None:
+def _log_toolcalls_fallback(toolcalls_path: Path, rollout: Any, final_info: RolloutInfo | None = None) -> None:
     """Fallback: log only sidecar tool calls when session JSONL is unavailable."""
     if not toolcalls_path.exists():
         return
     for line in toolcalls_path.read_text().strip().splitlines():
         event = json.loads(line)
         call_id = event.get("call_id", "")
+        is_finished = event.get("finished", False)
         rollout.log(ToolCall(
             name=event.get("tool", ""),
             content=json.dumps(event.get("arguments", {})),
@@ -199,7 +203,8 @@ def _log_toolcalls_fallback(toolcalls_path: Path, rollout: Any) -> None:
         rollout.log(
             ToolResult(content=event.get("result", ""), call_id=call_id),
             reward=event.get("reward"),
-            is_finished=event.get("finished", False),
+            is_finished=is_finished,
+            rollout_info=final_info if is_finished else None,
         )
 
 
@@ -229,11 +234,7 @@ class OpenClawAgent(BaseAgent):
         with tempfile.TemporaryDirectory(prefix="orwd-openclaw-trial-") as tmpdir:
             tmppath = Path(tmpdir)
             result_file = tmppath / "result.json"
-            trial_id = ctx.task_spec.get(
-                "id", ctx.task_spec.get(
-                    "index", ctx.task_index if ctx.task_index is not None else "unknown",
-                ),
-            )
+            trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
             log_dir = Path(ctx.output_dir) if ctx.output_dir else None
 
             env_tool_names = [t.name for t in ctx.tools]
@@ -369,7 +370,7 @@ class OpenClawAgent(BaseAgent):
                         environment=ctx.env_name,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"model": ctx.model, "agent": "openclaw"},
+                        metadata={},
                     )
                     print(
                         f"[openclaw] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}",
@@ -388,7 +389,10 @@ class OpenClawAgent(BaseAgent):
                 main_log.write(json.dumps(prompt_event) + "\n")
 
             if main_rollout:
-                main_rollout.log(UserMessage(content=full_prompt))
+                main_rollout.log(
+                    UserMessage(content=full_prompt),
+                    rollout_info=RolloutInfo(task_index=ctx.task_index, harness="openclaw"),
+                )
 
             # --- Read stdout and stderr concurrently ---
             # OpenClaw outputs its JSON result to stderr (via runtime.log),
@@ -498,7 +502,11 @@ class OpenClawAgent(BaseAgent):
                     candidates = glob.glob(str(openclaw_dir / "agents" / "*" / "sessions" / f"*orwd*{trial_id}*.jsonl"))
                     if candidates:
                         session_jsonl = Path(candidates[0])
-                _log_openclaw_from_session(session_jsonl, toolcalls_path, main_rollout)
+                _final_info = RolloutInfo(
+                    task_index=ctx.task_index,
+                    duration_ms=duration_ms,
+                )
+                _log_openclaw_from_session(session_jsonl, toolcalls_path, main_rollout, final_info=_final_info)
 
             # Log to JSONL
             if main_log:
