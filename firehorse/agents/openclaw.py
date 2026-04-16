@@ -52,6 +52,17 @@ _PROVIDER_KEY_ENV = {
 }
 
 
+# Firehorse effort → OpenClaw `thinkingDefault`. OpenClaw's "max" equivalent
+# is "xhigh"; the rest map identically. For OpenRouter-routed models this
+# surfaces as `reasoning.effort` in the upstream payload.
+_EFFORT_TO_OPENCLAW_THINKING = {
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "max": "xhigh",
+}
+
+
 def _build_auth_profiles(provider: str) -> dict:
     """Build an OpenClaw auth-profiles.json with the API key for the given provider."""
     env_var = _PROVIDER_KEY_ENV.get(provider)
@@ -290,12 +301,13 @@ class OpenClawAgent(BaseAgent):
             auth_profiles = _build_auth_profiles(oc_provider)
             (agent_dir / "auth-profiles.json").write_text(json.dumps(auth_profiles, indent=2))
 
+            agents_defaults: dict[str, Any] = {"model": oc_model}
+            thinking = _EFFORT_TO_OPENCLAW_THINKING.get(ctx.effort)
+            if thinking:
+                agents_defaults["thinkingDefault"] = thinking
+
             openclaw_config: dict[str, Any] = {
-                "agents": {
-                    "defaults": {
-                        "model": oc_model,
-                    }
-                },
+                "agents": {"defaults": agents_defaults},
                 "auth": {
                     "profiles": {
                         "default": {
