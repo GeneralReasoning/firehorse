@@ -14,6 +14,7 @@ async def command_run(
     env: str,
     agent: str,
     model: str,
+    variant: str | None = None,
     n_concurrent: int = 1,
     split: str = "test",
     max_tasks: int | None = None,
@@ -38,6 +39,7 @@ async def command_run(
         env=env,
         agent=agent,
         model=model,
+        variant=variant,
         n_concurrent=n_concurrent,
         split=split,
         max_tasks=max_tasks,
@@ -67,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env", required=True, help="Environment name (e.g. GeneralReasoning/portfolio)")
     parser.add_argument("--agent", default="claude-code", help="Agent type (default: claude-code)")
     parser.add_argument("--model", required=True, help="Model identifier (e.g. anthropic/claude-opus-4-6)")
+    parser.add_argument("--variant", default=None, help="Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH)")
     parser.add_argument("--n-concurrent", type=int, default=1, help="Max parallel trials (default: 1)")
     parser.add_argument("--split", default="test", help="Which split to evaluate (default: test)")
     parser.add_argument("--max-tasks", type=int, default=None, help="Limit number of tasks")
@@ -129,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
             env=args.env,
             agent=args.agent,
             model=args.model,
+            variant=args.variant,
             n_concurrent=args.n_concurrent,
             split=args.split,
             max_tasks=args.max_tasks,

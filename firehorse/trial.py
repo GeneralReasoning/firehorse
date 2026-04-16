@@ -60,6 +60,7 @@ async def run_trial(
                 task_spec=config.task_spec,
                 run_name=config.run_name,
                 split=config.split,
+                variant=config.variant,
                 task_index=config.task_index,
                 max_turns=config.max_turns,
                 provider_url=config.provider_url,

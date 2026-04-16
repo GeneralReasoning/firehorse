@@ -20,6 +20,7 @@ from openreward import (
 from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
+from firehorse.mcp.convert import strip_or_reward_marker
 
 # Map of lowercase env tool names -> Claude built-in tool names they should replace
 ENV_TO_BUILTIN = {
@@ -277,7 +278,7 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
 
                 rollout.log(
                     ToolResult(
-                        content=content_str,
+                        content=strip_or_reward_marker(content_str),
                         call_id=block.get("tool_use_id", ""),
                     ),
                     reward=reward,
@@ -451,6 +452,7 @@ class ClaudeCodeAgent(BaseAgent):
                         run_name=ctx.run_name,
                         rollout_name=f"trial_{trial_id}",
                         environment=ctx.env_name,
+                        variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
                         metadata={"effort": ctx.effort},
@@ -469,6 +471,7 @@ class ClaudeCodeAgent(BaseAgent):
                             run_name=ctx.run_name,
                             rollout_name=f"trial_{trial_id}_subagent_{parent}",
                             environment=ctx.env_name,
+                            variant=ctx.variant,
                             metadata={
                                 "parent_rollout": main_rollout.event_id,
                                 "parent_tool_use_id": parent,
@@ -515,13 +518,13 @@ class ClaudeCodeAgent(BaseAgent):
                         event = json.loads(line_str)
                     except json.JSONDecodeError:
                         if main_log:
-                            main_log.write(line_str + "\n")
+                            main_log.write(strip_or_reward_marker(line_str) + "\n")
                         continue
 
                     # Write to JSONL
                     log_file = _get_log(event)
                     if log_file:
-                        log_file.write(line_str + "\n")
+                        log_file.write(strip_or_reward_marker(line_str) + "\n")
 
                     # Log to OpenReward rollout
                     rollout = _get_rollout(event)

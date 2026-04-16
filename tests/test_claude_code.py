@@ -268,9 +268,11 @@ class TestLogEventToRollout:
         }
         _log_event_to_rollout(event, rollout)
         assert len(rollout.logged) == 1
-        _, kwargs = rollout.logged[0]
+        item, kwargs = rollout.logged[0]
         assert kwargs["reward"] == 1.0
         assert kwargs["is_finished"] is True
+        assert "OR_REWARD" not in item.content
+        assert item.content == "Result ok"
 
 
 # ---------------------------------------------------------------------------

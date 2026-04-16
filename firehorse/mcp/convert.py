@@ -1,8 +1,25 @@
 from __future__ import annotations
 
+import re
+
 from mcp.types import Tool, TextContent, ImageContent
 
 from openreward.api.environments.types import ToolSpec, ToolOutput
+
+
+_OR_REWARD_RE = re.compile(r'(?:\\n|\s)*\[OR_REWARD:\{[^}]+\}\]')
+
+
+def strip_or_reward_marker(text: str) -> str:
+    """Remove [OR_REWARD:{...}] markers injected by the MCP bridge.
+
+    The bridge appends these so agents can round-trip the reward/finished
+    signal through stdio. Once parsed into structured fields, the marker is
+    a transport artifact and should not appear in persisted traces.
+    Handles both raw text and JSON-escaped forms (for stripping raw
+    stream-json lines before writing to disk).
+    """
+    return _OR_REWARD_RE.sub("", text)
 
 
 def toolspec_to_mcp(spec: ToolSpec, description_override: str | None = None) -> Tool:

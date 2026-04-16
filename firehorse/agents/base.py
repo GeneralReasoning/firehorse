@@ -19,7 +19,8 @@ class TrialContext:
     task_spec: dict
     run_name: str
     split: str
-    task_index: int
+    variant: str | None = None
+    task_index: int | None = None
     max_turns: int | None = None
     provider_url: str | None = None
     disable_builtin_tools: list[str] = field(default_factory=list)

@@ -20,6 +20,7 @@ from openreward.api.rollouts.serializers.base import ReasoningItem
 from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
+from firehorse.mcp.convert import strip_or_reward_marker
 from firehorse.agents._subprocess_common import (
     ALWAYS_USE_BUILTIN,
     SUBPROCESS_LINE_LIMIT,
@@ -174,7 +175,7 @@ def _log_hermes_from_export(
                         pass
 
             rollout.log(
-                ToolResult(content=content_str, call_id=call_id),
+                ToolResult(content=strip_or_reward_marker(content_str), call_id=call_id),
                 reward=reward,
                 is_finished=is_finished,
                 rollout_info=final_info if is_finished else None,
@@ -362,6 +363,7 @@ class HermesAgent(BaseAgent):
                         run_name=ctx.run_name,
                         rollout_name=f"trial_{trial_id}",
                         environment=ctx.env_name,
+                        variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
                         metadata={},
@@ -401,7 +403,7 @@ class HermesAgent(BaseAgent):
                         continue
                     stdout_lines.append(line_str)
                     if main_log:
-                        main_log.write(line_str + "\n")
+                        main_log.write(strip_or_reward_marker(line_str) + "\n")
                     try:
                         event = json.loads(line_str)
                     except json.JSONDecodeError:
