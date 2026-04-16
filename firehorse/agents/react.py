@@ -337,6 +337,8 @@ class ReactAgent(BaseAgent):
                 break
 
             tool_result_blocks: list[dict] = []
+            turn_reward: float | None = None
+            turn_finished = False
             for block in message.content:
                 if block.type != "tool_use":
                     continue
@@ -347,8 +349,10 @@ class ReactAgent(BaseAgent):
 
                     if tr.finished:
                         finished = True
+                        turn_finished = True
                     if tr.reward is not None:
                         last_reward = tr.reward
+                        turn_reward = tr.reward
 
                     _jsonl_write(log_file, {
                         "type": "tool_result",
@@ -377,6 +381,8 @@ class ReactAgent(BaseAgent):
             if rollout:
                 rollout.log_anthropic_message(
                     user_msg,
+                    reward=turn_reward,
+                    is_finished=turn_finished,
                     rollout_info=_final_info() if finished else None,
                 )
             messages.append(user_msg)
@@ -496,6 +502,8 @@ class ReactAgent(BaseAgent):
                     if rollout:
                         rollout.log_openai_response(
                             output_item,
+                            reward=tr.reward,
+                            is_finished=tr.finished,
                             rollout_info=_final_info() if finished else None,
                         )
                 except Exception as e:
@@ -592,6 +600,8 @@ class ReactAgent(BaseAgent):
             contents.append(candidate_content)
 
             tool_response_parts: list[Any] = []
+            turn_reward: float | None = None
+            turn_finished = False
             for part in candidate_content.parts:
                 if not part.function_call:
                     continue
@@ -605,8 +615,10 @@ class ReactAgent(BaseAgent):
                     text = _format_tool_output(tr)
                     if tr.finished:
                         finished = True
+                        turn_finished = True
                     if tr.reward is not None:
                         last_reward = tr.reward
+                        turn_reward = tr.reward
 
                     _jsonl_write(log_file, {
                         "type": "tool_result",
@@ -641,6 +653,8 @@ class ReactAgent(BaseAgent):
             if rollout:
                 rollout.log_gdm_message(
                     tool_content,
+                    reward=turn_reward,
+                    is_finished=turn_finished,
                     rollout_info=_final_info() if finished else None,
                 )
             contents.append(tool_content)
@@ -788,6 +802,8 @@ class ReactAgent(BaseAgent):
                     if rollout:
                         rollout.log_openai_completions(
                             tool_msg,
+                            reward=tr.reward,
+                            is_finished=tr.finished,
                             rollout_info=_final_info() if finished else None,
                         )
                     messages.append(tool_msg)

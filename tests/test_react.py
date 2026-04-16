@@ -1026,6 +1026,165 @@ class TestEdgeCases:
         # Assistant + tool results logged via provider-specific method
         assert mock_rollout.log_anthropic_message.call_count >= 1
 
+        # The tool-results log call must carry reward/is_finished so the
+        # openreward rollout block reflects what the env reported.
+        tool_result_calls = [
+            c for c in mock_rollout.log_anthropic_message.call_args_list
+            if c.kwargs.get("is_finished") or c.kwargs.get("reward") is not None
+        ]
+        assert len(tool_result_calls) == 1
+        assert tool_result_calls[0].kwargs["reward"] == 1.0
+        assert tool_result_calls[0].kwargs["is_finished"] is True
+
+    @pytest.mark.asyncio
+    async def test_rollout_reward_openai(self):
+        """openai provider: reward/is_finished must flow into log_openai_response."""
+        session = MockSession(
+            tools=[FakeToolSpec(name="submit", description="Submit")],
+            call_tool_responses=[
+                FakeToolOutput(blocks=[FakeTextBlock(text="Done!")], reward=1.0, finished=True),
+            ],
+        )
+
+        mock_rollout = MagicMock()
+        mock_rollout.event_id = "ev"
+        mock_rollout_client = MagicMock()
+        mock_rollout_client.rollout.create.return_value = mock_rollout
+
+        ctx = make_trial_context(
+            model="openai/gpt-5.4",
+            session=session,
+            logging=True,
+            rollout_client=mock_rollout_client,
+        )
+
+        func_call = MagicMock()
+        func_call.type = "function_call"
+        func_call.name = "submit"
+        func_call.arguments = "{}"
+        func_call.call_id = "fc_1"
+        response = MagicMock()
+        response.output = [func_call]
+        response.usage = MagicMock(input_tokens=1, output_tokens=1)
+
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
+            mock_client = AsyncMock()
+            mock_client.responses.create = AsyncMock(return_value=response)
+            MockOAI.return_value = mock_client
+            await ReactAgent().run(ctx)
+
+        tool_result_calls = [
+            c for c in mock_rollout.log_openai_response.call_args_list
+            if c.kwargs.get("is_finished") or c.kwargs.get("reward") is not None
+        ]
+        assert len(tool_result_calls) == 1
+        assert tool_result_calls[0].kwargs["reward"] == 1.0
+        assert tool_result_calls[0].kwargs["is_finished"] is True
+
+    @pytest.mark.asyncio
+    async def test_rollout_reward_google(self):
+        """google provider: reward/is_finished must flow into log_gdm_message."""
+        session = MockSession(
+            tools=[FakeToolSpec(name="submit", description="Submit")],
+            call_tool_responses=[
+                FakeToolOutput(blocks=[FakeTextBlock(text="Done!")], reward=0.5, finished=True),
+            ],
+        )
+
+        mock_rollout = MagicMock()
+        mock_rollout.event_id = "ev"
+        mock_rollout_client = MagicMock()
+        mock_rollout_client.rollout.create.return_value = mock_rollout
+
+        ctx = make_trial_context(
+            model="google/gemini-2.5-flash",
+            session=session,
+            logging=True,
+            rollout_client=mock_rollout_client,
+        )
+
+        mock_fc = MagicMock()
+        mock_fc.name = "submit"
+        mock_fc.args = {}
+        mock_part = MagicMock()
+        mock_part.function_call = mock_fc
+        mock_content = MagicMock()
+        mock_content.parts = [mock_part]
+        mock_candidate = MagicMock()
+        mock_candidate.content = mock_content
+        mock_response = MagicMock()
+        mock_response.candidates = [mock_candidate]
+        mock_response.usage_metadata = MagicMock(prompt_token_count=1, candidates_token_count=1)
+
+        with patch("firehorse.agents.react.google_genai.Client") as MockClient, \
+             patch("firehorse.agents.react.google_types") as mock_types:
+            mock_client = MagicMock()
+            mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
+            MockClient.return_value = mock_client
+            mock_types.Tool.return_value = MagicMock()
+            mock_types.Content.return_value = MagicMock()
+            mock_types.Part.return_value = MagicMock()
+            mock_types.Part.from_function_response.return_value = MagicMock()
+            mock_types.GenerateContentConfig.return_value = MagicMock()
+            await ReactAgent().run(ctx)
+
+        tool_result_calls = [
+            c for c in mock_rollout.log_gdm_message.call_args_list
+            if c.kwargs.get("is_finished") or c.kwargs.get("reward") is not None
+        ]
+        assert len(tool_result_calls) == 1
+        assert tool_result_calls[0].kwargs["reward"] == 0.5
+        assert tool_result_calls[0].kwargs["is_finished"] is True
+
+    @pytest.mark.asyncio
+    async def test_rollout_reward_openrouter(self):
+        """openrouter provider: reward/is_finished must flow into log_openai_completions."""
+        session = MockSession(
+            tools=[FakeToolSpec(name="submit", description="Submit")],
+            call_tool_responses=[
+                FakeToolOutput(blocks=[FakeTextBlock(text="Done!")], reward=0.75, finished=True),
+            ],
+        )
+
+        mock_rollout = MagicMock()
+        mock_rollout.event_id = "ev"
+        mock_rollout_client = MagicMock()
+        mock_rollout_client.rollout.create.return_value = mock_rollout
+
+        ctx = make_trial_context(
+            model="openrouter/deepseek/deepseek-v3.2",
+            session=session,
+            logging=True,
+            rollout_client=mock_rollout_client,
+        )
+
+        mock_tc = MagicMock()
+        mock_tc.id = "tc_1"
+        mock_tc.function.name = "submit"
+        mock_tc.function.arguments = "{}"
+        mock_msg = MagicMock()
+        mock_msg.content = None
+        mock_msg.tool_calls = [mock_tc]
+        mock_choice = MagicMock()
+        mock_choice.message = mock_msg
+        mock_response = MagicMock()
+        mock_response.choices = [mock_choice]
+        mock_response.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
+            mock_client = AsyncMock()
+            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            MockOAI.return_value = mock_client
+            await ReactAgent().run(ctx)
+
+        tool_result_calls = [
+            c for c in mock_rollout.log_openai_completions.call_args_list
+            if c.kwargs.get("is_finished") or c.kwargs.get("reward") is not None
+        ]
+        assert len(tool_result_calls) == 1
+        assert tool_result_calls[0].kwargs["reward"] == 0.75
+        assert tool_result_calls[0].kwargs["is_finished"] is True
+
     @pytest.mark.asyncio
     async def test_run_dispatches_to_correct_provider(self):
         """run() dispatches to the correct provider method."""
