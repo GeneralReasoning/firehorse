@@ -9,6 +9,7 @@ authors = [
 dependencies = [
     "openreward>=0.1.97",
     "mcp>=1.0.0",
+    "zstandard>=0.22.0",
 ]
 
 [project.optional-dependencies]

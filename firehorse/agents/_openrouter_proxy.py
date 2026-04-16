@@ -12,11 +12,60 @@ WebSocket upgrade requests are rejected instantly (not absorbed by a framework).
 from __future__ import annotations
 
 import asyncio
+import json
 import ssl
 import sys
 from typing import Any
 
 import aiohttp
+
+
+# OpenRouter's Responses API doesn't accept every tool `type` that Codex emits.
+# - `web_search` (OpenAI built-in) is rejected; OpenRouter only accepts its own
+#   `openrouter:web_search` variant.
+# - `namespace` is Codex's MCP-tool-grouping shape and is not in the OpenAI
+#   Responses spec at all.
+# We rewrite the /responses request body to keep it valid:
+#   - drop tool types OpenRouter rejects
+#   - flatten `namespace` entries into plain `function` tools using the
+#     `mcp__<server>__<tool>` naming Codex already understands when parsing
+#     the model's function_call items back.
+_OPENROUTER_SUPPORTED_TOOL_TYPES = {"function"}
+
+
+def _rewrite_tools_for_openrouter(tools: list[dict]) -> list[dict]:
+    rewritten: list[dict] = []
+    for tool in tools:
+        t_type = tool.get("type")
+        if t_type == "namespace":
+            prefix = tool.get("name", "")
+            for sub in tool.get("tools", []) or []:
+                if sub.get("type") != "function":
+                    continue
+                flat = dict(sub)
+                flat["name"] = f"{prefix}{sub.get('name', '')}"
+                rewritten.append(flat)
+        elif t_type in _OPENROUTER_SUPPORTED_TOOL_TYPES:
+            rewritten.append(tool)
+        # Unsupported types (web_search, image_generation, etc.) are dropped.
+    return rewritten
+
+
+def _rewrite_responses_body(body: bytes) -> bytes:
+    try:
+        data = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return body
+    if not isinstance(data, dict):
+        return body
+    tools = data.get("tools")
+    if not isinstance(tools, list):
+        return body
+    new_tools = _rewrite_tools_for_openrouter(tools)
+    if new_tools == tools:
+        return body
+    data["tools"] = new_tools
+    return json.dumps(data).encode("utf-8")
 
 
 class OpenRouterProxy:
@@ -146,6 +195,12 @@ class OpenRouterProxy:
             dctx = zstandard.ZstdDecompressor()
             # Use streaming decompressor since frames may lack content size
             body = dctx.decompress(body, max_output_size=16 * 1024 * 1024)
+
+        # Rewrite /responses request tools so OpenRouter accepts them.
+        if method.upper() == "POST" and path.split("?", 1)[0].endswith("/responses") and body:
+            before_len = len(body)
+            body = _rewrite_responses_body(body)
+            print(f"[codex-proxy] rewrote /responses body {before_len}->{len(body)}b", file=sys.stderr)
 
         target_url = f"{self._target_base}{path}"
         print(f"[codex-proxy] {method} {path} body={len(body)}b", file=sys.stderr)

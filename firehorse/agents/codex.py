@@ -20,8 +20,6 @@ from openreward import (
 )
 from openreward.models import RolloutInfo
 
-from firehorse.agents._openrouter_proxy import OpenRouterProxy
-
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.mcp.convert import strip_or_reward_marker
 
@@ -160,28 +158,44 @@ def _build_codex_mcp_prompt(env_tool_names: list[str], excluded: list[str]) -> s
 
 def _resolve_model_codex(
     model: str, provider_url: str | None,
-) -> tuple[str, dict[str, str], str | None]:
-    """Map model string to Codex CLI model name, extra env vars, and proxy target.
+) -> tuple[str, dict[str, str] | None]:
+    """Map model string to Codex CLI model name and optional model_provider config.
 
-    Returns (model_name, extra_env, proxy_target_base_url_or_none).
-    proxy_target is set when we need a local auth-injecting proxy (e.g. OpenRouter).
+    Returns ``(model_name, provider_config_or_none)``.
+
+    When ``provider_config`` is ``None`` we let Codex use its default OpenAI
+    provider. Otherwise the dict is merged into ``-c model_providers.fh=...``
+    and ``-c model_provider="fh"`` so Codex talks to the given endpoint.
+
+    We set ``support_namespaces=false`` on custom providers so Codex falls back
+    to individual ``function`` tools for MCP servers — the ``namespace`` tool
+    shape it uses by default isn't accepted by the OpenRouter Responses API
+    (see https://github.com/openai/codex Responses API spec), and breaks the
+    tool router when rewritten client-side.
     """
     if model.startswith("openai/"):
-        return model.split("/", 1)[1], {}, None
+        return model.split("/", 1)[1], None
     elif model.startswith("openrouter/"):
         name = model.split("/", 1)[1]
-        or_key = os.environ.get("OPENROUTER_API_KEY", "")
-        if not or_key:
+        if not os.environ.get("OPENROUTER_API_KEY"):
             raise ValueError("OPENROUTER_API_KEY environment variable required for openrouter/ models")
-        # Codex doesn't pass Bearer auth on the HTTP fallback for custom base URLs,
-        # so we route through a local proxy that injects the auth header.
-        return name, {"_PROXY_API_KEY": or_key}, "https://openrouter.ai/api/v1"
+        return name, {
+            "name": "OpenRouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "env_key": "OPENROUTER_API_KEY",
+            "wire_api": "responses",
+            "support_namespaces": False,
+        }
     elif provider_url:
-        # For custom provider URLs, use a proxy with the user's OPENAI_API_KEY
-        api_key = os.environ.get("OPENAI_API_KEY", "")
-        if not api_key:
+        if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY environment variable required for --provider-url")
-        return model, {"_PROXY_API_KEY": api_key}, provider_url.rstrip("/")
+        return model, {
+            "name": "Custom",
+            "base_url": provider_url.rstrip("/"),
+            "env_key": "OPENAI_API_KEY",
+            "wire_api": "responses",
+            "support_namespaces": False,
+        }
     else:
         raise ValueError(
             f"Model {model!r} requires 'openai/' prefix for the codex agent. "
@@ -355,19 +369,8 @@ class CodexAgent(BaseAgent):
                     file=sys.stderr,
                 )
 
-            # Resolve model and provider
-            model_name, extra_env, proxy_target = _resolve_model_codex(ctx.model, ctx.provider_url)
-
-            # Start local auth-injecting proxy for non-OpenAI providers
-            proxy = None
-            proxy_api_key = extra_env.pop("_PROXY_API_KEY", None)
-            if proxy_target and proxy_api_key:
-                proxy = OpenRouterProxy(api_key=proxy_api_key, target_base=proxy_target)
-                await proxy.start()
-                print(
-                    f"[codex] Auth proxy started on :{proxy.port} -> {proxy_target}",
-                    file=sys.stderr,
-                )
+            # Resolve model and optional model_provider config
+            model_name, provider_config = _resolve_model_codex(ctx.model, ctx.provider_url)
 
             # Build system prompt: upstream Codex prompt + MCP tools section
             mcp_section = _build_codex_mcp_prompt(env_tool_names, exclude_tools)
@@ -376,15 +379,14 @@ class CodexAgent(BaseAgent):
             # Codex exec has no --system-prompt flag; prepend to user prompt
             full_prompt = f"{system_prompt}\n\n---\n\n{ctx.prompt_text}"
 
-            # Always sandbox the built-in shell to read-only.
-            # The agent should use MCP tools for all environment interactions.
-            sandbox_flags = ["--sandbox", "read-only"]
-
-            # Build command
+            # Build command. We bypass Codex's own approval + sandbox because
+            # every side-effect happens in the OpenReward environment via MCP.
+            # Without this, Codex cancels every MCP tool call in exec mode
+            # since there's no interactive UI to approve them.
             cmd = [
                 "codex", "exec",
                 "--json",
-                *sandbox_flags,
+                "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
                 "--model", model_name,
                 "-C", str(tmppath),
@@ -400,17 +402,25 @@ class CodexAgent(BaseAgent):
             if ctx.effort:
                 cmd.extend(["-c", f"model_reasoning_effort={json.dumps(ctx.effort)}"])
 
-            # Route through local proxy for non-OpenAI providers.
-            # Codex appends /responses to openai_base_url, so we set it to
-            # proxy.base_url (no /v1 — the proxy already routes to target_base which includes /v1).
-            if proxy:
-                cmd.extend(["-c", f'openai_base_url="{proxy.base_url}"'])
+
+            # Configure a non-default model_provider when needed (OpenRouter
+            # or --provider-url). Codex will pick up the bearer token from
+            # env_key itself, so no local auth proxy is required.
+            if provider_config:
+                for key, value in provider_config.items():
+                    cmd.extend([
+                        "-c",
+                        f"model_providers.fh.{key}={json.dumps(value)}",
+                    ])
+                cmd.extend(["-c", 'model_provider="fh"'])
 
             cmd.append(full_prompt)
 
-            proc_env = {**os.environ, **extra_env}
+            proc_env = {**os.environ}
 
             print(f"[codex] Launching with model={model_name}", file=sys.stderr)
+            if os.environ.get("FIREHORSE_CODEX_DEBUG"):
+                print(f"[codex] cmd={' '.join(cmd[:-1])} <prompt>", file=sys.stderr)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -520,8 +530,6 @@ class CodexAgent(BaseAgent):
                     await proc.wait()
                 return AgentResult(success=False, error=str(e))
             finally:
-                if proxy:
-                    await proxy.stop()
                 duration_ms = int((time.monotonic() - start_time) * 1000)
 
                 result_data = None
