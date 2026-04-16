@@ -653,26 +653,30 @@ class TestReSumLogging:
 class TestOpenAIProvider:
     @pytest.mark.asyncio
     async def test_basic_call(self):
-        """OpenAI provider makes a chat completion call."""
-        mock_tc = MagicMock()
-        mock_tc.id = "tc_001"
-        mock_tc.function.name = "submit"
-        mock_tc.function.arguments = '{"answer": "42"}'
+        """OpenAI provider makes a Responses API call."""
+        # Mock a function_call output item
+        mock_fc = MagicMock()
+        mock_fc.type = "function_call"
+        mock_fc.call_id = "tc_001"
+        mock_fc.name = "submit"
+        mock_fc.arguments = '{"answer": "42"}'
 
-        mock_msg = MagicMock()
-        mock_msg.content = "Let me submit."
-        mock_msg.tool_calls = [mock_tc]
+        # Mock a message output item with text
+        mock_text_block = MagicMock()
+        mock_text_block.type = "output_text"
+        mock_text_block.text = "Let me submit."
 
-        mock_choice = MagicMock()
-        mock_choice.message = mock_msg
+        mock_msg_item = MagicMock()
+        mock_msg_item.type = "message"
+        mock_msg_item.content = [mock_text_block]
 
         mock_response = MagicMock()
-        mock_response.choices = [mock_choice]
-        mock_response.usage = MagicMock(prompt_tokens=100, completion_tokens=50)
+        mock_response.output = [mock_msg_item, mock_fc]
+        mock_response.usage = MagicMock(input_tokens=100, output_tokens=50)
 
         with patch("openai.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
-            mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+            mock_client.responses.create = AsyncMock(return_value=mock_response)
             MockOAI.return_value = mock_client
 
             from firehorse.agents.resum.providers.openai_provider import OpenAIProvider
@@ -699,7 +703,7 @@ class TestOpenAIProvider:
 
         with patch("openai.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
-            mock_client.chat.completions.create = AsyncMock(
+            mock_client.responses.create = AsyncMock(
                 side_effect=openai_mod.BadRequestError(
                     message="This model's maximum context length is 128000 tokens",
                     response=MagicMock(status_code=400),
@@ -720,42 +724,43 @@ class TestOpenAIProvider:
         assert result.context_overflow is True
 
     def test_message_management(self):
-        """Test append/rebuild operations."""
+        """Test append/rebuild operations (Responses API format)."""
         with patch("openai.AsyncOpenAI"):
             from firehorse.agents.resum.providers.openai_provider import OpenAIProvider
             provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
 
+        # build_initial_messages: system prompt stored internally, only user message returned
         messages = provider.build_initial_messages("system prompt", "user prompt")
-        assert len(messages) == 2
-        assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert provider._system_prompt == "system prompt"
 
         provider.append_user_message(messages, "continue")
-        assert len(messages) == 3
-        assert messages[2]["content"] == "continue"
+        assert len(messages) == 2
+        assert messages[1]["content"] == "continue"
 
+        # rebuild_after_compaction: system prompt stored internally
         rebuilt = provider.rebuild_after_compaction("sys", "prompt", "summary text")
-        assert len(rebuilt) == 3
-        assert rebuilt[0]["role"] == "system"
-        assert rebuilt[1]["content"] == "prompt"
-        assert "summary text" in rebuilt[2]["content"]
+        assert len(rebuilt) == 2
+        assert rebuilt[0]["content"] == "prompt"
+        assert "summary text" in rebuilt[1]["content"]
 
     def test_messages_to_text(self):
-        """Test message formatting for compaction."""
+        """Test message formatting for compaction (Responses API format)."""
         with patch("openai.AsyncOpenAI"):
             from firehorse.agents.resum.providers.openai_provider import OpenAIProvider
             provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
 
         messages = [
-            {"role": "system", "content": "Be helpful"},
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi there"},
-            {"role": "tool", "tool_call_id": "tc1", "content": "result data"},
+            {"type": "function_call", "call_id": "tc1", "name": "bash", "arguments": '{"cmd": "ls"}'},
+            {"type": "function_call_output", "call_id": "tc1", "output": "result data"},
         ]
         text = provider.messages_to_text(messages)
-        assert "SYSTEM: Be helpful" in text
         assert "USER: Hello" in text
         assert "ASSISTANT: Hi there" in text
+        assert "Tool Call" in text
         assert "TOOL OUTPUT" in text
 
 

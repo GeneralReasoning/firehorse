@@ -53,6 +53,7 @@ class AnthropicProvider(ProviderClient):
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
         # Store system prompt separately since Anthropic takes it as a parameter
         self._system_prompt: str = ""
+        self._thinking_supported: bool = True
 
     @property
     def context_window(self) -> int | None:
@@ -84,7 +85,7 @@ class AnthropicProvider(ProviderClient):
         }
         if tools:
             kwargs["tools"] = tools
-        if effort:
+        if effort and self._thinking_supported:
             kwargs["thinking"] = {"type": "adaptive"}
             kwargs["output_config"] = {"effort": effort}
 
@@ -95,6 +96,12 @@ class AnthropicProvider(ProviderClient):
                 break
             except anthropic.BadRequestError as e:
                 err_msg = str(e).lower()
+                if "thinking" in err_msg and "not supported" in err_msg:
+                    self._thinking_supported = False
+                    kwargs.pop("thinking", None)
+                    kwargs.pop("output_config", None)
+                    print(f"\n⚠  WARNING: {self.model} does not support thinking. --effort will be ignored.\n", file=sys.stderr)
+                    continue
                 if "too long" in err_msg or "context" in err_msg or "token" in err_msg:
                     return LLMResponse(raw_message=None, context_overflow=True)
                 raise
