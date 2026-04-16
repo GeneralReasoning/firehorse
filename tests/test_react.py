@@ -110,6 +110,7 @@ def make_trial_context(model: str = "anthropic/claude-sonnet-4-6", **overrides) 
         task_spec={"id": "test_task"},
         run_name="test_run",
         split="train",
+        task_index=0,
         max_turns=None,
         provider_url=None,
         disable_builtin_tools=[],
@@ -249,7 +250,7 @@ class TestRunAnthropic:
             MockAnthropic.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None)
+            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is True
@@ -280,7 +281,7 @@ class TestRunAnthropic:
             MockAnthropic.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None)
+            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is False
@@ -324,7 +325,7 @@ class TestRunAnthropic:
             MockAnthropic.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None)
+            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None, 0.0)
 
         assert result.success is True
         assert result.turns_used == 1
@@ -356,13 +357,13 @@ class TestRunOpenAI:
         response.output = [func_call]
         response.usage = MagicMock(input_tokens=80, output_tokens=30)
 
-        with patch("openai.AsyncOpenAI") as MockOAI:
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
             mock_client.responses.create = AsyncMock(return_value=response)
             MockOAI.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_openai(ctx, "gpt-5.4", None, None)
+            result = await agent._run_openai(ctx, "gpt-5.4", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is True
@@ -383,13 +384,13 @@ class TestRunOpenAI:
         response.output = [text_item]
         response.usage = MagicMock(input_tokens=10, output_tokens=5)
 
-        with patch("openai.AsyncOpenAI") as MockOAI:
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
             mock_client.responses.create = AsyncMock(return_value=response)
             MockOAI.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_openai(ctx, "gpt-5.4", None, None)
+            result = await agent._run_openai(ctx, "gpt-5.4", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is False
@@ -433,8 +434,8 @@ class TestRunGoogle:
         mock_response.candidates = [mock_candidate]
         mock_response.usage_metadata = mock_usage
 
-        with patch("google.genai.Client") as MockClient, \
-             patch("google.genai.types") as mock_types:
+        with patch("firehorse.agents.react.google_genai.Client") as MockClient, \
+             patch("firehorse.agents.react.google_types") as mock_types:
             mock_client = MagicMock()
             mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             MockClient.return_value = mock_client
@@ -446,7 +447,7 @@ class TestRunGoogle:
             mock_types.GenerateContentConfig.return_value = MagicMock()
 
             agent = ReactAgent()
-            result = await agent._run_google(ctx, "gemini-2.5-flash", None, None)
+            result = await agent._run_google(ctx, "gemini-2.5-flash", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is True
@@ -473,8 +474,8 @@ class TestRunGoogle:
         mock_response.candidates = [mock_candidate]
         mock_response.usage_metadata = MagicMock(prompt_token_count=10, candidates_token_count=5)
 
-        with patch("google.genai.Client") as MockClient, \
-             patch("google.genai.types") as mock_types:
+        with patch("firehorse.agents.react.google_genai.Client") as MockClient, \
+             patch("firehorse.agents.react.google_types") as mock_types:
             mock_client = MagicMock()
             mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
             MockClient.return_value = mock_client
@@ -484,7 +485,7 @@ class TestRunGoogle:
             mock_types.GenerateContentConfig.return_value = MagicMock()
 
             agent = ReactAgent()
-            result = await agent._run_google(ctx, "gemini-2.5-flash", None, None)
+            result = await agent._run_google(ctx, "gemini-2.5-flash", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is False
@@ -523,13 +524,13 @@ class TestRunOpenRouter:
         mock_response.choices = [mock_choice]
         mock_response.usage = MagicMock(prompt_tokens=70, completion_tokens=20)
 
-        with patch("openai.AsyncOpenAI") as MockOAI:
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
             MockOAI.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_openrouter(ctx, "deepseek/deepseek-v3.2", None, None)
+            result = await agent._run_openrouter(ctx, "deepseek/deepseek-v3.2", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is True
@@ -554,13 +555,13 @@ class TestRunOpenRouter:
         mock_response.choices = [mock_choice]
         mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
 
-        with patch("openai.AsyncOpenAI") as MockOAI:
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
             mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
             MockOAI.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_openrouter(ctx, "deepseek/deepseek-v3.2", None, None)
+            result = await agent._run_openrouter(ctx, "deepseek/deepseek-v3.2", None, None, 0.0)
 
         assert result.success is True
         assert result.finished is False
@@ -606,7 +607,7 @@ class TestEdgeCases:
             MockAnthropic.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None)
+            result = await agent._run_anthropic(ctx, "claude-sonnet-4-6", None, None, 0.0)
 
         assert result.turns_used == 2
         assert result.finished is False
@@ -640,7 +641,7 @@ class TestEdgeCases:
 
         captured_messages: list[dict] = []
 
-        with patch("openai.AsyncOpenAI") as MockOAI:
+        with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
             mock_client = AsyncMock()
 
             async def capture_create(**kwargs):
@@ -651,7 +652,7 @@ class TestEdgeCases:
             MockOAI.return_value = mock_client
 
             agent = ReactAgent()
-            result = await agent._run_openrouter(ctx, "test/model", None, None)
+            result = await agent._run_openrouter(ctx, "test/model", None, None, 0.0)
 
         assert result.finished is True
         assert result.reward == 1.0
@@ -801,7 +802,7 @@ class TestEdgeCases:
             response.output = [func_call]
             response.usage = MagicMock(input_tokens=80, output_tokens=30)
 
-            with patch("openai.AsyncOpenAI") as MockOAI:
+            with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
                 mock_client = AsyncMock()
                 mock_client.responses.create = AsyncMock(return_value=response)
                 MockOAI.return_value = mock_client
@@ -847,7 +848,7 @@ class TestEdgeCases:
             mock_response.choices = [mock_choice]
             mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
 
-            with patch("openai.AsyncOpenAI") as MockOAI:
+            with patch("firehorse.agents.react.AsyncOpenAI") as MockOAI:
                 mock_client = AsyncMock()
                 mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
                 MockOAI.return_value = mock_client
@@ -898,8 +899,8 @@ class TestEdgeCases:
             mock_response.candidates = [mock_candidate]
             mock_response.usage_metadata = mock_usage
 
-            with patch("google.genai.Client") as MockClient, \
-                 patch("google.genai.types") as mock_types:
+            with patch("firehorse.agents.react.google_genai.Client") as MockClient, \
+                 patch("firehorse.agents.react.google_types") as mock_types:
                 mock_client = MagicMock()
                 mock_client.aio.models.generate_content = AsyncMock(return_value=mock_response)
                 MockClient.return_value = mock_client

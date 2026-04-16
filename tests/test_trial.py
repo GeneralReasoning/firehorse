@@ -45,7 +45,7 @@ class TestIsMcpFailure:
 
 class TestMcpRetryConstants:
     def test_max_retries(self):
-        assert _MCP_RETRY_MAX == 3
+        assert _MCP_RETRY_MAX == 8
 
     def test_base_delay(self):
         assert _MCP_RETRY_BASE_DELAY == 2.0
@@ -163,12 +163,13 @@ class TestRunTrialRetry:
         config = _make_trial_config()
         task = mock.MagicMock(task_spec={"id": "test-task"})
 
-        with mock.patch("firehorse.trial.asyncio.sleep", new_callable=mock.AsyncMock) as mock_sleep:
+        with mock.patch("firehorse.trial.asyncio.sleep", new_callable=mock.AsyncMock) as mock_sleep, \
+             mock.patch("firehorse.trial.random.uniform", return_value=0.0):
             result = await run_trial(env, task, agent, config)
 
         assert result.success is True
         assert agent.run.call_count == 3
-        # First retry: 2s, second retry: 4s
+        # First retry: 2s, second retry: 4s (with jitter mocked to 0)
         assert mock_sleep.call_count == 2
         mock_sleep.assert_any_call(2.0)
         mock_sleep.assert_any_call(4.0)
