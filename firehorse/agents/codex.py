@@ -301,6 +301,37 @@ def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
         ))
 
 
+# Codex v0.121 introduced a `namespace` tool shape for MCP servers that the
+# OpenRouter Responses API rejects ("No matching discriminator" at tools[N]).
+# Until upstream ships a way to disable it, cap at the last known-good release.
+_MAX_SUPPORTED_CODEX_VERSION = (0, 120)
+
+
+def _parse_codex_version(version: str) -> tuple[int, int, int] | None:
+    """Parse ``codex-cli 0.120.0`` (or ``codex 0.120.0``) into a tuple."""
+    for token in version.split():
+        parts = token.split(".")
+        if len(parts) >= 3 and all(p.isdigit() for p in parts[:3]):
+            return int(parts[0]), int(parts[1]), int(parts[2])
+    return None
+
+
+def _warn_if_unsupported_codex_version(version: str) -> None:
+    parsed = _parse_codex_version(version)
+    if parsed is None:
+        return
+    if parsed[:2] > _MAX_SUPPORTED_CODEX_VERSION:
+        print(
+            f"[codex] WARNING: codex-cli {parsed[0]}.{parsed[1]}.{parsed[2]} "
+            f"is newer than the last tested version "
+            f"({_MAX_SUPPORTED_CODEX_VERSION[0]}.{_MAX_SUPPORTED_CODEX_VERSION[1]}.x). "
+            "Non-OpenAI providers (e.g. openrouter/*) may fail because Codex "
+            "now sends `namespace` tools that OpenRouter's Responses API "
+            "rejects. Pin via: bun add -g @openai/codex@0.120",
+            file=sys.stderr,
+        )
+
+
 class CodexAgent(BaseAgent):
 
     @property
@@ -320,6 +351,7 @@ class CodexAgent(BaseAgent):
             )
         version = stdout.decode().strip()
         print(f"Codex CLI version: {version}", file=sys.stderr)
+        _warn_if_unsupported_codex_version(version)
 
     async def run(self, ctx: TrialContext) -> AgentResult:
         start_time = time.monotonic()
@@ -419,8 +451,6 @@ class CodexAgent(BaseAgent):
             proc_env = {**os.environ}
 
             print(f"[codex] Launching with model={model_name}", file=sys.stderr)
-            if os.environ.get("FIREHORSE_CODEX_DEBUG"):
-                print(f"[codex] cmd={' '.join(cmd[:-1])} <prompt>", file=sys.stderr)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
