@@ -207,7 +207,8 @@ class TestResolveApiKey:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env-key")
         assert resolve_api_key("anthropic", {}) == "sk-env-key"
 
-    def test_openrouter_falls_back_to_openai(self):
+    def test_openrouter_falls_back_to_openai(self, monkeypatch):
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         assert resolve_api_key("openrouter", {"openai_api_key": "sk-oai"}) == "sk-oai"
 
     def test_missing_raises(self, monkeypatch):

@@ -13,12 +13,12 @@ dependencies = [
 
 [project.optional-dependencies]
 react = [
-    "anthropic>=0.40.0",
+    "anthropic>=0.95.0",
     "openai>=1.60.0",
     "google-genai>=1.0.0",
 ]
 resum = [
-    "anthropic>=0.40.0",
+    "anthropic>=0.95.0",
     "openai>=1.60.0",
     "google-genai>=1.0.0",
 ]
