@@ -153,6 +153,7 @@ def make_trial_context(model: str = "openai/gpt-4o", **overrides) -> TrialContex
         task_spec={"id": "test_task"},
         run_name="test_run",
         split="train",
+        task_index=0,
         max_turns=None,
         provider_url=None,
         disable_builtin_tools=[],

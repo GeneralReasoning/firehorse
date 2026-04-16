@@ -153,6 +153,7 @@ class TestConfigDefaults:
         ctx = TrialContext(
             prompt_text="test", tools=[], session=None,
             model="m", env_name="e", task_spec={}, run_name="r", split="s",
+            task_index=0,
         )
         assert ctx.use_builtin_descriptions is True
 
@@ -161,6 +162,7 @@ class TestConfigDefaults:
         ctx = TrialContext(
             prompt_text="test", tools=[], session=None,
             model="m", env_name="e", task_spec={}, run_name="r", split="s",
+            task_index=0,
             use_builtin_descriptions=False,
         )
         assert ctx.use_builtin_descriptions is False
