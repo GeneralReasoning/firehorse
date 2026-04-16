@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import os
 import re
@@ -505,6 +506,7 @@ class ClaudeCodeAgent(BaseAgent):
             mcp_failed_tool_calls = 0
             mcp_tool_use_ids: dict[str, str] = {}  # tool_use_id -> mcp tool name
             mcp_result_count = 0
+            bridge_stderr: collections.deque[str] = collections.deque(maxlen=20)
 
             async def read_stdout():
                 nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count
@@ -536,9 +538,11 @@ class ClaudeCodeAgent(BaseAgent):
                         for srv in event.get("mcp_servers", []):
                             if srv.get("name") == "openreward" and srv.get("status") != "connected":
                                 mcp_failed = True
+                                extra = {k: v for k, v in srv.items() if k not in ("name", "status")}
+                                detail = f" details={extra}" if extra else ""
                                 print(
-                                    f"[claude-code] MCP 'openreward' status={srv.get('status')}"
-                                    f" — will abort after first futile calls",
+                                    f"[claude-code][{trial_id}] MCP 'openreward' status="
+                                    f"{srv.get('status')!r}{detail} — will abort after first futile calls",
                                     file=sys.stderr,
                                 )
 
@@ -561,8 +565,15 @@ class ClaudeCodeAgent(BaseAgent):
                                 if mcp_failed:
                                     mcp_failed_tool_calls += 1
                                     if mcp_failed_tool_calls >= 2:
+                                        tail = "\n    ".join(list(bridge_stderr)[-5:]) or \
+                                            "(no [openreward-bridge] output captured)"
                                         print(
-                                            "[claude-code] MCP failed, agent making futile calls — terminating",
+                                            f"[claude-code][{trial_id}] MCP failed, agent making futile "
+                                            f"calls — terminating\n"
+                                            f"  last bridge output:\n    {tail}\n"
+                                            f"  common causes: missing/invalid OPENREWARD_API_KEY, "
+                                            f"backend rejecting env/task, or high concurrency "
+                                            f"overloading the backend",
                                             file=sys.stderr,
                                         )
                                         proc.kill()
@@ -601,6 +612,7 @@ class ClaudeCodeAgent(BaseAgent):
                         or "Error" in line_str
                         or "error" in line_str
                     ):
+                        bridge_stderr.append(line_str)
                         print(f"  {line_str}", file=sys.stderr)
 
             try:
@@ -653,6 +665,15 @@ class ClaudeCodeAgent(BaseAgent):
                 for f in subagent_logs.values():
                     f.close()
 
+                # Build MCP error string with bridge stderr tail (keeps the canonical
+                # "MCP … failed to connect" substring so trial.py retry logic still fires).
+                mcp_error: str | None = None
+                if mcp_failed:
+                    mcp_error = "MCP server 'openreward' failed to connect — no environment tools available"
+                    tail = " | ".join(list(bridge_stderr)[-3:]).strip()
+                    if tail:
+                        mcp_error = f"{mcp_error} ({tail})"
+
                 # Write per-trial result.json
                 if log_dir:
                     trial_result = {
@@ -672,7 +693,7 @@ class ClaudeCodeAgent(BaseAgent):
                             "input_tokens": input_tokens,
                             "output_tokens": output_tokens,
                         },
-                        "error": "MCP server 'openreward' failed to connect — no environment tools available" if mcp_failed else None,
+                        "error": mcp_error,
                         "rollout_url": f"https://openreward.ai/rollout/{main_rollout.event_id}" if main_rollout else None,
                     }
                     result_json_path = log_dir / f"trial_{trial_id}_result.json"
@@ -682,7 +703,7 @@ class ClaudeCodeAgent(BaseAgent):
             if mcp_failed:
                 return AgentResult(
                     success=False,
-                    error="MCP server 'openreward' failed to connect — no environment tools available",
+                    error=mcp_error,
                     turns_used=turns_used,
                     cost_usd=cost_usd,
                     input_tokens=input_tokens,
