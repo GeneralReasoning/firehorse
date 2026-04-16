@@ -23,17 +23,21 @@ from firehorse.agents.codex import (
 
 class TestResolveModelCodex:
     def test_openai_prefix_strips(self):
-        name, env, proxy = _resolve_model_codex("openai/gpt-5-codex", None)
+        name, provider_config = _resolve_model_codex("openai/gpt-5-codex", None)
         assert name == "gpt-5-codex"
-        assert env == {}
-        assert proxy is None
+        assert provider_config is None
 
     @mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-test-key"})
-    def test_openrouter_returns_proxy_target(self):
-        name, env, proxy = _resolve_model_codex("openrouter/openai/gpt-4.1", None)
+    def test_openrouter_returns_provider_config(self):
+        name, provider_config = _resolve_model_codex("openrouter/openai/gpt-4.1", None)
         assert name == "openai/gpt-4.1"
-        assert env["_PROXY_API_KEY"] == "or-test-key"
-        assert proxy == "https://openrouter.ai/api/v1"
+        assert provider_config == {
+            "name": "OpenRouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "env_key": "OPENROUTER_API_KEY",
+            "wire_api": "responses",
+            "support_namespaces": False,
+        }
 
     def test_openrouter_missing_key_raises(self):
         with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": ""}, clear=False):
@@ -41,11 +45,16 @@ class TestResolveModelCodex:
                 _resolve_model_codex("openrouter/openai/gpt-4.1", None)
 
     @mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"})
-    def test_provider_url_uses_proxy(self):
-        name, env, proxy = _resolve_model_codex("custom-model", "https://my-proxy.com/v1")
+    def test_provider_url_returns_provider_config(self):
+        name, provider_config = _resolve_model_codex("custom-model", "https://my-proxy.com/v1")
         assert name == "custom-model"
-        assert env["_PROXY_API_KEY"] == "sk-test"
-        assert proxy == "https://my-proxy.com/v1"
+        assert provider_config == {
+            "name": "Custom",
+            "base_url": "https://my-proxy.com/v1",
+            "env_key": "OPENAI_API_KEY",
+            "wire_api": "responses",
+            "support_namespaces": False,
+        }
 
     def test_no_prefix_no_provider_raises(self):
         with pytest.raises(ValueError, match="requires 'openai/' prefix"):
