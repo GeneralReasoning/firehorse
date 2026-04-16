@@ -15,6 +15,7 @@ from openreward import (
     ToolResult,
     UserMessage,
 )
+from openreward.models import RolloutInfo
 
 from firehorse.agents.base import AgentResult, BaseAgent, TrialContext
 from firehorse.agents.resum.compaction import CompactionResult, compact_conversation, micro_compact, should_compact_proactively
@@ -94,8 +95,6 @@ class ReSumAgent(BaseAgent):
                     split=ctx.split,
                     task_spec=ctx.task_spec,
                     metadata={
-                        "model": ctx.model,
-                        "agent": "resum",
                         "provider": provider_name,
                         "effort": ctx.effort,
                     },
@@ -113,7 +112,7 @@ class ReSumAgent(BaseAgent):
             "system_prompt": SYSTEM_PROMPT,
             "environment_prompt": ctx.prompt_text,
         })
-        self._log_rollout_system_and_prompt(rollout, SYSTEM_PROMPT, ctx.prompt_text)
+        self._log_rollout_system_and_prompt(rollout, SYSTEM_PROMPT, ctx.prompt_text, ctx.task_index)
 
         # --- Core loop ---
         max_turns = ctx.max_turns
@@ -217,7 +216,14 @@ class ReSumAgent(BaseAgent):
                     if reward is not None:
                         last_reward = reward
 
-                    self._log_tool_result(log_file, rollout, tc.id, output_text, reward, is_finished)
+                    final_info = None
+                    if is_finished:
+                        final_info = RolloutInfo(
+                            task_index=ctx.task_index,
+                            duration_ms=int((time.monotonic() - start_ms) * 1000),
+                            num_compactions=compaction_count,
+                        )
+                    self._log_tool_result(log_file, rollout, tc.id, output_text, reward, is_finished, rollout_info=final_info)
 
                     print(
                         f"[resum]   -> reward={reward} finished={is_finished} "
@@ -367,6 +373,7 @@ class ReSumAgent(BaseAgent):
         output: str,
         reward: float | None,
         finished: bool,
+        rollout_info: RolloutInfo | None = None,
     ) -> None:
         self._log_jsonl(log_file, {
             "type": "tool_result",
@@ -380,6 +387,7 @@ class ReSumAgent(BaseAgent):
                 ToolResult(content=output, call_id=call_id),
                 reward=reward,
                 is_finished=finished,
+                rollout_info=rollout_info,
             )
 
     def _log_compaction(
@@ -445,9 +453,18 @@ class ReSumAgent(BaseAgent):
                     call_id=compact_call_id,
                 ))
 
-    def _log_rollout_system_and_prompt(self, rollout: Any, system_prompt: str, user_prompt: str) -> None:
+    def _log_rollout_system_and_prompt(
+        self,
+        rollout: Any,
+        system_prompt: str,
+        user_prompt: str,
+        task_index: int,
+    ) -> None:
         if rollout:
-            rollout.log(SystemMessage(content=system_prompt))
+            rollout.log(
+                SystemMessage(content=system_prompt),
+                rollout_info=RolloutInfo(task_index=task_index, harness="resum"),
+            )
             rollout.log(UserMessage(content=user_prompt))
 
     def _log_summary(

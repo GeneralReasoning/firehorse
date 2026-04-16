@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, IO
 
 from openreward import SystemMessage, UserMessage
+from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 
@@ -129,7 +130,7 @@ class ReactAgent(BaseAgent):
 
     async def run(self, ctx: TrialContext) -> AgentResult:
         provider, model_name = _parse_provider(ctx.model)
-        trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index if ctx.task_index is not None else "unknown"))
+        trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         log_dir = Path(ctx.output_dir) if ctx.output_dir else None
         start = time.monotonic()
 
@@ -144,7 +145,7 @@ class ReactAgent(BaseAgent):
                     variant=ctx.variant,
                     split=ctx.split,
                     task_spec=ctx.task_spec,
-                    metadata={"model": ctx.model, "agent": "react"},
+                    metadata={},
                 )
                 print(
                     f"[react] Rollout: https://openreward.ai/rollout/{rollout.event_id}",
@@ -163,7 +164,10 @@ class ReactAgent(BaseAgent):
         _jsonl_write(log_file, {"type": "user", "content": ctx.prompt_text})
 
         if rollout:
-            rollout.log(SystemMessage(content=SYSTEM_PROMPT))
+            rollout.log(
+                SystemMessage(content=SYSTEM_PROMPT),
+                rollout_info=RolloutInfo(task_index=ctx.task_index, harness="react"),
+            )
             rollout.log(UserMessage(content=ctx.prompt_text))
 
         print(f"[react] Launching with provider={provider} model={model_name}", file=sys.stderr)
@@ -172,13 +176,13 @@ class ReactAgent(BaseAgent):
         result: AgentResult | None = None
         try:
             if provider == "anthropic":
-                result = await self._run_anthropic(ctx, model_name, rollout, log_file)
+                result = await self._run_anthropic(ctx, model_name, rollout, log_file, start)
             elif provider == "openai":
-                result = await self._run_openai(ctx, model_name, rollout, log_file)
+                result = await self._run_openai(ctx, model_name, rollout, log_file, start)
             elif provider == "google":
-                result = await self._run_google(ctx, model_name, rollout, log_file)
+                result = await self._run_google(ctx, model_name, rollout, log_file, start)
             elif provider == "openrouter":
-                result = await self._run_openrouter(ctx, model_name, rollout, log_file)
+                result = await self._run_openrouter(ctx, model_name, rollout, log_file, start)
             else:
                 result = AgentResult(success=False, error=f"Unsupported provider: {provider}")
         except Exception as e:
@@ -248,8 +252,15 @@ class ReactAgent(BaseAgent):
         model_name: str,
         rollout: Any,
         log_file: IO | None,
+        trial_start: float,
     ) -> AgentResult:
         _require(anthropic, "anthropic", "anthropic")
+
+        def _final_info() -> RolloutInfo:
+            return RolloutInfo(
+                task_index=ctx.task_index,
+                duration_ms=int((time.monotonic() - trial_start) * 1000),
+            )
 
         kwargs: dict[str, Any] = {}
         if ctx.provider_url:
@@ -353,7 +364,10 @@ class ReactAgent(BaseAgent):
             user_msg = {"role": "user", "content": tool_result_blocks}
             _jsonl_write(log_file, {"type": "tool_results", "provider": "anthropic", "raw": user_msg})
             if rollout:
-                rollout.log_anthropic_message(user_msg)
+                rollout.log_anthropic_message(
+                    user_msg,
+                    rollout_info=_final_info() if finished else None,
+                )
             messages.append(user_msg)
 
         return AgentResult(
@@ -375,8 +389,15 @@ class ReactAgent(BaseAgent):
         model_name: str,
         rollout: Any,
         log_file: IO | None,
+        trial_start: float,
     ) -> AgentResult:
         _require(AsyncOpenAI, "openai", "openai")
+
+        def _final_info() -> RolloutInfo:
+            return RolloutInfo(
+                task_index=ctx.task_index,
+                duration_ms=int((time.monotonic() - trial_start) * 1000),
+            )
 
         kwargs: dict[str, Any] = {}
         if ctx.provider_url:
@@ -451,7 +472,10 @@ class ReactAgent(BaseAgent):
                         "finished": tr.finished,
                     })
                     if rollout:
-                        rollout.log_openai_response(output_item)
+                        rollout.log_openai_response(
+                            output_item,
+                            rollout_info=_final_info() if finished else None,
+                        )
                 except Exception as e:
                     output_item = {
                         "type": "function_call_output",
@@ -485,10 +509,17 @@ class ReactAgent(BaseAgent):
         model_name: str,
         rollout: Any,
         log_file: IO | None,
+        trial_start: float,
     ) -> AgentResult:
         _require(google_genai, "google-genai", "google")
         genai = google_genai
         types = google_types
+
+        def _final_info() -> RolloutInfo:
+            return RolloutInfo(
+                task_index=ctx.task_index,
+                duration_ms=int((time.monotonic() - trial_start) * 1000),
+            )
 
         client = genai.Client()
         tools_spec = await ctx.session.list_tools(format="google")
@@ -586,7 +617,10 @@ class ReactAgent(BaseAgent):
             tool_content = types.Content(role="user", parts=tool_response_parts)
             _jsonl_write(log_file, {"type": "tool_results", "provider": "google", "raw": str(tool_content)})
             if rollout:
-                rollout.log_gdm_message(tool_content)
+                rollout.log_gdm_message(
+                    tool_content,
+                    rollout_info=_final_info() if finished else None,
+                )
             contents.append(tool_content)
 
         return AgentResult(
@@ -608,8 +642,15 @@ class ReactAgent(BaseAgent):
         model_name: str,
         rollout: Any,
         log_file: IO | None,
+        trial_start: float,
     ) -> AgentResult:
         _require(AsyncOpenAI, "openai", "openrouter")
+
+        def _final_info() -> RolloutInfo:
+            return RolloutInfo(
+                task_index=ctx.task_index,
+                duration_ms=int((time.monotonic() - trial_start) * 1000),
+            )
 
         api_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")
         base_url = ctx.provider_url or "https://openrouter.ai/api/v1"
@@ -713,7 +754,10 @@ class ReactAgent(BaseAgent):
                         "finished": tr.finished,
                     })
                     if rollout:
-                        rollout.log_openai_completions(tool_msg)
+                        rollout.log_openai_completions(
+                            tool_msg,
+                            rollout_info=_final_info() if finished else None,
+                        )
                     messages.append(tool_msg)
                 except Exception as e:
                     tool_msg = {
