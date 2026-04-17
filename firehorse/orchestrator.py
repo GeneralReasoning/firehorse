@@ -27,7 +27,8 @@ def _print_banner(
     tools: list[ToolSpec],
 ) -> None:
     variant_suffix = f" variant={config.variant}" if config.variant else ""
-    print(f"\nOpenReward Run: {config.env}{variant_suffix} ({config.split} split, {n_tasks} tasks)", file=sys.stderr)
+    trials_info = f", {config.n_trials} trials/task" if config.n_trials > 1 else ""
+    print(f"\nOpenReward Run: {config.env}{variant_suffix} ({config.split} split, {n_tasks} tasks{trials_info})", file=sys.stderr)
     print(f"Agent: {config.agent} | Model: {config.model}", file=sys.stderr)
     print(f"Concurrency: {config.n_concurrent}", file=sys.stderr)
 
@@ -114,7 +115,10 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # Auto-detect required secrets from env vars
     secrets = dict(config.secrets)
-    required = await env.list_required_secrets()
+    try:
+        required = await env.list_required_secrets()
+    except Exception:
+        required = []
     for key in required:
         if key not in secrets:
             # Try uppercase env var (e.g. openai_api_key -> OPENAI_API_KEY)
@@ -128,6 +132,14 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
 
     # Fetch tools for the banner
     tools = await env.list_tools()
+    # Expand indices for multiple trials per task
+    if config.n_trials > 1:
+        expanded = []
+        for idx in indices:
+            for _ in range(config.n_trials):
+                expanded.append(idx)
+        indices = expanded
+
     _print_banner(config, len(indices), tools)
 
     # Setup agent
@@ -143,6 +155,21 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
     os.makedirs(output_dir, exist_ok=True)
     print(f"Trajectory logs: {os.path.abspath(output_dir)}/", file=sys.stderr)
 
+    # --- Prefix cache setup ---
+    if config.prefix_cache_dir:
+        from firehorse.cache import PrefixCache, warm_from_trajectories
+        prefix_cache = PrefixCache(config.prefix_cache_dir)
+        print(f"Prefix cache: {os.path.abspath(config.prefix_cache_dir)}/", file=sys.stderr)
+        if config.warm_cache_from:
+            warm_from_trajectories(
+                prefix_cache,
+                config.warm_cache_from,
+                model=config.model,
+                provider_url=config.provider_url,
+            )
+    else:
+        prefix_cache = None
+
     semaphore = asyncio.Semaphore(config.n_concurrent)
     completed_count = 0
     total = len(indices)
@@ -155,9 +182,14 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 jitter = random.uniform(0, config.n_concurrent * 1.0)
                 await asyncio.sleep(jitter)
             task = await env.get_task(config.split, abs_index)
+            task_spec = dict(task.task_spec)
+            # Append trial index to task ID for unique filenames when n_trials > 1
+            if config.n_trials > 1:
+                original_id = task_spec.get("id", task_spec.get("index", abs_index))
+                task_spec["id"] = f"{original_id}_trial{local_idx}"
             trial_config = TrialConfig(
                 task_index=local_idx,
-                task_spec=dict(task.task_spec),
+                task_spec=task_spec,
                 run_name=run_name,
                 env=config.env,
                 split=config.split,
@@ -173,10 +205,12 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
                 plan_mode=config.plan_mode,
+                prefix_cache_dir=config.prefix_cache_dir,
             )
             result = await run_trial(
                 env, task, agent, trial_config,
                 rollout_client=client if config.logging else None,
+                prefix_cache=prefix_cache,
             )
             completed_count += 1
             reward_str = f"{result.reward:.3f}" if result.reward is not None else "N/A"
@@ -215,6 +249,13 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
         split=config.split,
     )
     summary.print_report()
+
+    if prefix_cache:
+        stats = prefix_cache.stats()
+        print(
+            f"Prefix cache: {stats['hits']} hits, {stats['misses']} misses",
+            file=sys.stderr,
+        )
 
     # Write aggregate run_result.json
     summary.write_json(Path(output_dir) / "run_result.json")

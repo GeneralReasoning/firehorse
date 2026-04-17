@@ -34,6 +34,7 @@ class TrialContext:
     toolset_name: str | None = None  # Built-in toolset name (e.g. "claude-code", "codex")
     rollout_client: Any = None  # AsyncOpenReward, for creating rollouts
     context_window: int | None = None  # Override model's default context window size
+    prefix_cache: Any = None  # PrefixCache instance when prefix caching is enabled
 
 
 @dataclass

@@ -32,6 +32,8 @@ class LLMResponse:
     output_tokens: int | None = None
     # Context overflow signal — the agent loop handles compaction
     context_overflow: bool = False
+    # True when this response came from the prefix cache (no API call made)
+    cache_hit: bool = False
 
 
 class ProviderClient(ABC):

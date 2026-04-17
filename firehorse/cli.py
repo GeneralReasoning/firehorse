@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 
 from firehorse.config import RunConfig
@@ -30,6 +31,10 @@ async def command_run(
     logging: bool = True,
     use_env_descriptions: bool = False,
     use_all_filesystem_tools: bool = False,
+    n_trials: int = 1,
+    prefix_cache: bool = False,
+    prefix_cache_dir: str | None = None,
+    warm_cache_from: str | None = None,
 ) -> int:
     disabled = []
     if disable_builtin_tools:
@@ -55,6 +60,11 @@ async def command_run(
         logging=logging,
         use_builtin_descriptions=not use_env_descriptions,
         use_all_filesystem_tools=use_all_filesystem_tools,
+        n_trials=n_trials,
+        prefix_cache_dir=prefix_cache_dir or (
+            os.path.expanduser("~/.firehorse/prefix_cache") if (prefix_cache or warm_cache_from) else None
+        ),
+        warm_cache_from=warm_cache_from,
     )
 
     summary = await run_evaluation(config)
@@ -76,6 +86,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip-tasks", type=int, default=0, help="Skip first N tasks (default: 0)")
     parser.add_argument("--run-name", default=None, help="Name for this run")
     parser.add_argument("--max-turns", type=int, default=None, help="Max tool call turns per trial")
+    parser.add_argument("--n-trials", type=int, default=1, help="Number of trials per task (default: 1)")
     parser.add_argument(
         "--effort", default="high", choices=["low", "medium", "high", "max"],
         help="Claude thinking effort level (default: high)",
@@ -112,10 +123,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--use-all-filesystem-tools", action="store_true", default=False,
         help="Codex: expose all filesystem tools via MCP (default: only bash, others filtered)",
     )
+    parser.add_argument(
+        "--prefix-cache", action="store_true", default=False,
+        help="Enable prefix caching: reuse LLM responses when the conversation prefix matches",
+    )
+    parser.add_argument(
+        "--prefix-cache-dir", default=None,
+        help="Directory for prefix cache storage (default: ~/.firehorse/prefix_cache/)",
+    )
+    parser.add_argument(
+        "--warm-cache-from", default=None, metavar="DIR",
+        help="Warm the prefix cache from existing trajectory JSONL files in DIR before running",
+    )
+    return parser
+
+
+def _build_view_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="firehorse view",
+        description="Pretty-print JSONL trajectory files",
+    )
+    parser.add_argument("path", help="JSONL file or output directory")
+    parser.add_argument("--full", action="store_true", default=False, help="Show full outputs (default: truncate)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_list = argv if argv is not None else sys.argv[1:]
+
+    # Handle 'view' subcommand
+    if args_list and args_list[0] == "view":
+        from pathlib import Path
+        from firehorse.viewer import view_trace, view_directory
+        view_args = _build_view_parser().parse_args(args_list[1:])
+        p = Path(view_args.path)
+        if p.is_dir():
+            view_directory(p, full=view_args.full)
+        else:
+            view_trace(p, full=view_args.full)
+        return 0
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -148,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
             logging=not args.no_logging,
             use_env_descriptions=args.use_env_descriptions,
             use_all_filesystem_tools=args.use_all_filesystem_tools,
+            n_trials=args.n_trials,
+            prefix_cache=args.prefix_cache,
+            prefix_cache_dir=args.prefix_cache_dir,
+            warm_cache_from=args.warm_cache_from,
         ))
     except KeyboardInterrupt:
         print("\nInterrupted", file=sys.stderr)

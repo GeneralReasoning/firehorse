@@ -64,6 +64,11 @@ class ReSumAgent(BaseAgent):
         if hasattr(provider, "resolve_context_window"):
             await provider.resolve_context_window()
 
+        # Wrap provider with caching if prefix cache is enabled
+        if ctx.prefix_cache:
+            from firehorse.cache import CachingProviderClient
+            provider = CachingProviderClient(provider, ctx.prefix_cache, provider_name)
+
         print(f"[resum] Provider={provider_name} model={model_id}", file=sys.stderr)
         if provider.context_window:
             print(f"[resum] Context window: {provider.context_window:,} tokens", file=sys.stderr)
@@ -174,11 +179,12 @@ class ReSumAgent(BaseAgent):
                 # Successful LLM call — reset micro-compaction flag
                 micro_compacted = False
 
-                # Accumulate tokens
-                if response.input_tokens:
-                    total_input_tokens += response.input_tokens
-                if response.output_tokens:
-                    total_output_tokens += response.output_tokens
+                # Accumulate tokens (skip for cache hits — no API call was made)
+                if not response.cache_hit:
+                    if response.input_tokens:
+                        total_input_tokens += response.input_tokens
+                    if response.output_tokens:
+                        total_output_tokens += response.output_tokens
 
                 # Append assistant message
                 provider.append_assistant(messages, response)
@@ -332,7 +338,7 @@ class ReSumAgent(BaseAgent):
 
     def _log_assistant(self, log_file: Any, rollout: Any, response: LLMResponse) -> None:
         # JSONL
-        self._log_jsonl(log_file, {
+        event: dict[str, Any] = {
             "type": "assistant",
             "text_content": response.text_content,
             "reasoning_content": response.reasoning_content,
@@ -342,7 +348,10 @@ class ReSumAgent(BaseAgent):
             ],
             "input_tokens": response.input_tokens,
             "output_tokens": response.output_tokens,
-        })
+        }
+        if response.cache_hit:
+            event["cache_hit"] = True
+        self._log_jsonl(log_file, event)
 
         # Rollout
         if rollout:

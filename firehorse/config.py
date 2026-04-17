@@ -25,6 +25,9 @@ class RunConfig:
     logging: bool = True
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
+    n_trials: int = 1
+    prefix_cache_dir: str | None = None
+    warm_cache_from: str | None = None
 
     def effective_run_name(self) -> str:
         if self.run_name:
@@ -55,3 +58,4 @@ class TrialConfig:
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
     plan_mode: bool = False
+    prefix_cache_dir: str | None = None

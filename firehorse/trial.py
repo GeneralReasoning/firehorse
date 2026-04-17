@@ -32,6 +32,7 @@ async def run_trial(
     agent: BaseAgent,
     config: TrialConfig,
     rollout_client: Any = None,
+    prefix_cache: Any = None,
 ) -> TrialResult:
     start = time.monotonic()
 
@@ -74,6 +75,7 @@ async def run_trial(
                 plan_mode=config.plan_mode,
                 toolset_name=toolset_name,
                 rollout_client=rollout_client,
+                prefix_cache=prefix_cache,
             )
 
             result = await agent.run(ctx)

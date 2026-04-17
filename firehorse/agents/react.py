@@ -292,57 +292,119 @@ class ReactAgent(BaseAgent):
                 create_kwargs["thinking"] = {"type": "adaptive"}
                 create_kwargs["output_config"] = {"effort": ctx.effort}
 
-            try:
-                message = await client.messages.create(**create_kwargs)
-            except Exception as e:
-                if "thinking" in str(e).lower() and "not supported" in str(e).lower():
-                    thinking_supported = False
-                    create_kwargs.pop("thinking", None)
-                    create_kwargs.pop("output_config", None)
-                    print(f"\n⚠  WARNING: {model_name} does not support thinking. --effort will be ignored.\n", file=sys.stderr)
-                    message = await client.messages.create(**create_kwargs)
-                else:
-                    raise
+            # --- Prefix cache check ---
+            cache_hit = False
+            cached_response = None
+            if ctx.prefix_cache:
+                from firehorse.cache import serialize_response as _sr, deserialize_response
+                cache_key = ctx.prefix_cache.compute_key(
+                    model=model_name, system_prompt=SYSTEM_PROMPT,
+                    tools=tools, messages=messages,
+                    effort=ctx.effort, provider_name="anthropic",
+                )
+                cached_data = ctx.prefix_cache.get(cache_key)
+                if cached_data is not None:
+                    cached_response = deserialize_response(cached_data)
+                    cache_hit = True
+                    print(f"[react/anthropic] Cache HIT (key={cache_key[:12]}...)", file=sys.stderr)
 
-            total_input += message.usage.input_tokens
-            total_output += message.usage.output_tokens
+            if not cache_hit:
+                try:
+                    message = await client.messages.create(**create_kwargs)
+                except Exception as e:
+                    if "thinking" in str(e).lower() and "not supported" in str(e).lower():
+                        thinking_supported = False
+                        create_kwargs.pop("thinking", None)
+                        create_kwargs.pop("output_config", None)
+                        print(f"\n⚠  WARNING: {model_name} does not support thinking. --effort will be ignored.\n", file=sys.stderr)
+                        message = await client.messages.create(**create_kwargs)
+                    else:
+                        raise
+                total_input += message.usage.input_tokens
+                total_output += message.usage.output_tokens
 
             # Serialize content for logging
             assistant_content = []
-            for block in message.content:
-                if block.type == "text":
-                    assistant_content.append({"type": "text", "text": block.text})
-                elif block.type == "thinking":
+            if cache_hit:
+                if cached_response.reasoning_content:
                     assistant_content.append({
                         "type": "thinking",
-                        "thinking": getattr(block, "thinking", ""),
+                        "thinking": cached_response.reasoning_content,
                     })
-                elif block.type == "tool_use":
+                if cached_response.text_content:
+                    assistant_content.append({"type": "text", "text": cached_response.text_content})
+                for tc in cached_response.tool_calls:
                     assistant_content.append({
                         "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input,
+                        "id": tc.id,
+                        "name": tc.name,
+                        "input": tc.arguments,
                     })
-                else:
-                    assistant_content.append({"type": block.type})
+            else:
+                for block in message.content:
+                    if block.type == "text":
+                        assistant_content.append({"type": "text", "text": block.text})
+                    elif block.type == "thinking":
+                        assistant_content.append({
+                            "type": "thinking",
+                            "thinking": getattr(block, "thinking", ""),
+                        })
+                    elif block.type == "tool_use":
+                        assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        })
+                    else:
+                        assistant_content.append({"type": block.type})
 
             assistant_msg = {"role": "assistant", "content": assistant_content}
-            _jsonl_write(log_file, {"type": "assistant", "provider": "anthropic", "raw": assistant_msg})
+            log_event: dict[str, Any] = {"type": "assistant", "provider": "anthropic", "raw": assistant_msg}
+            if cache_hit:
+                log_event["cache_hit"] = True
+            _jsonl_write(log_file, log_event)
             if rollout:
                 rollout.log_anthropic_message(assistant_msg)
-            messages.append({"role": "assistant", "content": message.content})
 
-            if message.stop_reason != "tool_use":
+            # Append to messages
+            if cache_hit:
+                messages.append({"role": "assistant", "content": assistant_content})
+            else:
+                messages.append({"role": "assistant", "content": message.content})
+                # Store in cache
+                if ctx.prefix_cache:
+                    from firehorse.agents.resum.providers.base import LLMResponse, ToolCallInfo
+                    tc_infos = []
+                    text_parts = []
+                    reasoning_parts = []
+                    for block in message.content:
+                        if block.type == "text":
+                            text_parts.append(block.text)
+                        elif block.type == "tool_use":
+                            tc_infos.append(ToolCallInfo(id=block.id, name=block.name, arguments=block.input if isinstance(block.input, dict) else {}))
+                        elif block.type == "thinking":
+                            reasoning_parts.append(block.thinking)
+                    resp = LLMResponse(
+                        raw_message=None, tool_calls=tc_infos,
+                        text_content="\n".join(text_parts) if text_parts else None,
+                        reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
+                        input_tokens=message.usage.input_tokens, output_tokens=message.usage.output_tokens,
+                    )
+                    ctx.prefix_cache.put(cache_key, _sr(resp), model=model_name, provider="anthropic")
+
+            # Check stop reason
+            has_tool_use = any(b.get("type") == "tool_use" for b in assistant_content) if cache_hit else (message.stop_reason == "tool_use")
+            if not has_tool_use:
                 break
 
             tool_result_blocks: list[dict] = []
-            for block in message.content:
-                if block.type != "tool_use":
+            for block in assistant_content:
+                if block.get("type") != "tool_use":
                     continue
                 turns_used += 1
                 try:
-                    tr = await ctx.session.call_tool(block.name, block.input)
+                    tr = await ctx.session.call_tool(block["name"], block["input"])
                     content = _format_tool_output_anthropic(tr)
 
                     if tr.finished:
@@ -353,21 +415,21 @@ class ReactAgent(BaseAgent):
                     _jsonl_write(log_file, {
                         "type": "tool_result",
                         "provider": "anthropic",
-                        "tool_use_id": block.id,
-                        "tool_name": block.name,
+                        "tool_use_id": block["id"],
+                        "tool_name": block["name"],
                         "reward": tr.reward,
                         "finished": tr.finished,
                     })
 
                     tool_result_blocks.append({
                         "type": "tool_result",
-                        "tool_use_id": block.id,
+                        "tool_use_id": block["id"],
                         "content": content,
                     })
                 except Exception as e:
                     tool_result_blocks.append({
                         "type": "tool_result",
-                        "tool_use_id": block.id,
+                        "tool_use_id": block["id"],
                         "content": f"Error: {e}",
                         "is_error": True,
                     })
@@ -439,41 +501,110 @@ class ReactAgent(BaseAgent):
                 mapped = "high" if ctx.effort == "max" else ctx.effort
                 resp_kwargs["reasoning"] = {"effort": mapped}
 
-            try:
-                response = await client.responses.create(**resp_kwargs)
-            except Exception as e:
-                if "reasoning" in str(e).lower() and "not supported" in str(e).lower():
-                    reasoning_supported = False
-                    resp_kwargs.pop("reasoning", None)
-                    print(f"\n⚠  WARNING: {model_name} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+            # --- Prefix cache check ---
+            cache_hit = False
+            cached_response = None
+            if ctx.prefix_cache:
+                from firehorse.cache import serialize_response as _sr, deserialize_response
+                cache_key = ctx.prefix_cache.compute_key(
+                    model=model_name, system_prompt=SYSTEM_PROMPT,
+                    tools=tools, messages=input_list,
+                    effort=ctx.effort, provider_name="openai",
+                )
+                cached_data = ctx.prefix_cache.get(cache_key)
+                if cached_data is not None:
+                    cached_response = deserialize_response(cached_data)
+                    cache_hit = True
+                    print(f"[react/openai] Cache HIT (key={cache_key[:12]}...)", file=sys.stderr)
+
+            if not cache_hit:
+                try:
                     response = await client.responses.create(**resp_kwargs)
-                else:
-                    raise
+                except Exception as e:
+                    if "reasoning" in str(e).lower() and "not supported" in str(e).lower():
+                        reasoning_supported = False
+                        resp_kwargs.pop("reasoning", None)
+                        print(f"\n⚠  WARNING: {model_name} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+                        response = await client.responses.create(**resp_kwargs)
+                    else:
+                        raise
 
-            if response.usage:
-                total_input += response.usage.input_tokens
-                total_output += response.usage.output_tokens
+                if response.usage:
+                    total_input += response.usage.input_tokens
+                    total_output += response.usage.output_tokens
 
-            _jsonl_write(log_file, {
-                "type": "assistant",
-                "provider": "openai",
-                "raw": [{"type": getattr(item, "type", "unknown")} for item in response.output],
-            })
-            if rollout:
+            # Convert output to serializable dicts
+            output_items: list[dict] = []
+            if cache_hit:
+                if cached_response.text_content:
+                    output_items.append({"role": "assistant", "content": cached_response.text_content})
+                for tc in cached_response.tool_calls:
+                    output_items.append({
+                        "type": "function_call",
+                        "call_id": tc.id,
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments),
+                    })
+            else:
+                for item in response.output:
+                    item_type = getattr(item, "type", None)
+                    if item_type == "function_call":
+                        output_items.append({
+                            "type": "function_call",
+                            "call_id": item.call_id,
+                            "name": item.name,
+                            "arguments": item.arguments,
+                        })
+                    elif item_type == "message":
+                        text = ""
+                        for cb in getattr(item, "content", None) or []:
+                            if getattr(cb, "type", None) == "output_text":
+                                text += cb.text
+                        if text:
+                            output_items.append({"role": "assistant", "content": text})
+
+            log_event_oi: dict[str, Any] = {"type": "assistant", "provider": "openai", "raw": output_items}
+            if cache_hit:
+                log_event_oi["cache_hit"] = True
+            _jsonl_write(log_file, log_event_oi)
+            if not cache_hit and rollout:
                 rollout.log_openai_response(response)
 
-            input_list += response.output
+            input_list.extend(output_items)
 
+            # Store in cache on miss
+            if not cache_hit and ctx.prefix_cache:
+                from firehorse.cache import serialize_response as _sr
+                from firehorse.agents.resum.providers.base import LLMResponse, ToolCallInfo
+                tc_infos = []
+                text_parts = []
+                for oi in output_items:
+                    if oi.get("type") == "function_call":
+                        try:
+                            args = json.loads(oi["arguments"]) if isinstance(oi["arguments"], str) else oi["arguments"]
+                        except json.JSONDecodeError:
+                            args = {}
+                        tc_infos.append(ToolCallInfo(id=oi["call_id"], name=oi["name"], arguments=args))
+                    elif oi.get("role") == "assistant":
+                        text_parts.append(oi.get("content", ""))
+                resp = LLMResponse(
+                    raw_message=None, tool_calls=tc_infos,
+                    text_content="\n".join(text_parts) if text_parts else None,
+                    input_tokens=response.usage.input_tokens if response.usage else None,
+                    output_tokens=response.usage.output_tokens if response.usage else None,
+                )
+                ctx.prefix_cache.put(cache_key, _sr(resp), model=model_name, provider="openai")
+
+            # Execute tool calls
             has_tool_call = False
-            for item in response.output:
-                if getattr(item, "type", None) != "function_call":
+            for oi in output_items:
+                if oi.get("type") != "function_call":
                     continue
                 has_tool_call = True
                 turns_used += 1
                 try:
-                    tr = await ctx.session.call_tool(
-                        item.name, json.loads(str(item.arguments))
-                    )
+                    args = json.loads(oi["arguments"]) if isinstance(oi["arguments"], str) else oi["arguments"]
+                    tr = await ctx.session.call_tool(oi["name"], args)
                     text = _format_tool_output(tr)
                     if tr.finished:
                         finished = True
@@ -482,7 +613,7 @@ class ReactAgent(BaseAgent):
 
                     output_item = {
                         "type": "function_call_output",
-                        "call_id": item.call_id,
+                        "call_id": oi["call_id"],
                         "output": text,
                     }
                     input_list.append(output_item)
@@ -501,7 +632,7 @@ class ReactAgent(BaseAgent):
                 except Exception as e:
                     output_item = {
                         "type": "function_call_output",
-                        "call_id": item.call_id,
+                        "call_id": oi["call_id"],
                         "output": f"Error: {e}",
                     }
                     input_list.append(output_item)
@@ -575,21 +706,75 @@ class ReactAgent(BaseAgent):
             if ctx.max_turns and turns_used >= ctx.max_turns:
                 break
 
-            response = await client.aio.models.generate_content(
-                model=model_name,
-                config=config,
-                contents=contents,
-            )
+            # --- Prefix cache check ---
+            cache_hit = False
+            cached_response = None
+            if ctx.prefix_cache:
+                from firehorse.cache import serialize_response as _sr, deserialize_response
+                cache_key = ctx.prefix_cache.compute_key(
+                    model=model_name, system_prompt=SYSTEM_PROMPT,
+                    tools=str(genai_tools), messages=contents,
+                    effort=ctx.effort, provider_name="google",
+                )
+                cached_data = ctx.prefix_cache.get(cache_key)
+                if cached_data is not None:
+                    cached_response = deserialize_response(cached_data)
+                    cache_hit = True
+                    print(f"[react/google] Cache HIT (key={cache_key[:12]}...)", file=sys.stderr)
 
-            if response.usage_metadata:
-                total_input += response.usage_metadata.prompt_token_count or 0
-                total_output += response.usage_metadata.candidates_token_count or 0
+            if not cache_hit:
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    config=config,
+                    contents=contents,
+                )
 
-            candidate_content = response.candidates[0].content
-            _jsonl_write(log_file, {"type": "assistant", "provider": "google", "raw": str(candidate_content)})
+                if response.usage_metadata:
+                    total_input += response.usage_metadata.prompt_token_count or 0
+                    total_output += response.usage_metadata.candidates_token_count or 0
+
+            if cache_hit:
+                cached_parts = []
+                if cached_response.text_content:
+                    cached_parts.append(types.Part(text=cached_response.text_content))
+                for tc in cached_response.tool_calls:
+                    cached_parts.append(types.Part.from_function_call(
+                        name=tc.name, args=tc.arguments,
+                    ))
+                candidate_content = types.Content(role="model", parts=cached_parts)
+            else:
+                candidate_content = response.candidates[0].content
+
+            log_event_g: dict[str, Any] = {"type": "assistant", "provider": "google", "raw": str(candidate_content)}
+            if cache_hit:
+                log_event_g["cache_hit"] = True
+            _jsonl_write(log_file, log_event_g)
             if rollout:
                 rollout.log_gdm_message(candidate_content)
             contents.append(candidate_content)
+
+            # Store in cache on miss
+            if not cache_hit and ctx.prefix_cache:
+                from firehorse.agents.resum.providers.base import LLMResponse, ToolCallInfo
+                tc_infos = []
+                text_parts_g = []
+                for part in candidate_content.parts:
+                    if part.function_call:
+                        fc = part.function_call
+                        tc_infos.append(ToolCallInfo(
+                            id=f"google_{fc.name}_{turns_used}",
+                            name=fc.name,
+                            arguments=dict(fc.args) if fc.args else {},
+                        ))
+                    elif part.text:
+                        text_parts_g.append(part.text)
+                resp = LLMResponse(
+                    raw_message=None, tool_calls=tc_infos,
+                    text_content="\n".join(text_parts_g) if text_parts_g else None,
+                    input_tokens=response.usage_metadata.prompt_token_count if response.usage_metadata else None,
+                    output_tokens=response.usage_metadata.candidates_token_count if response.usage_metadata else None,
+                )
+                ctx.prefix_cache.put(cache_key, _sr(resp), model=model_name, provider="google")
 
             tool_response_parts: list[Any] = []
             for part in candidate_content.parts:
@@ -705,68 +890,135 @@ class ReactAgent(BaseAgent):
             if ctx.effort and reasoning_supported:
                 or_kwargs["reasoning_effort"] = "xhigh" if ctx.effort == "max" else ctx.effort
 
-            try:
-                response = await client.chat.completions.create(**or_kwargs)
-            except Exception as e:
-                if "reasoning" in str(e).lower() and "not supported" in str(e).lower():
-                    reasoning_supported = False
-                    or_kwargs.pop("reasoning_effort", None)
-                    print(f"\n⚠  WARNING: {model_name} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+            # --- Prefix cache check ---
+            cache_hit = False
+            cached_response = None
+            if ctx.prefix_cache:
+                from firehorse.cache import serialize_response as _sr, deserialize_response
+                cache_key = ctx.prefix_cache.compute_key(
+                    model=model_name, system_prompt=SYSTEM_PROMPT,
+                    tools=tools, messages=messages,
+                    effort=ctx.effort, provider_name="openrouter",
+                )
+                cached_data = ctx.prefix_cache.get(cache_key)
+                if cached_data is not None:
+                    cached_response = deserialize_response(cached_data)
+                    cache_hit = True
+                    print(f"[react/openrouter] Cache HIT (key={cache_key[:12]}...)", file=sys.stderr)
+
+            if not cache_hit:
+                try:
                     response = await client.chat.completions.create(**or_kwargs)
-                else:
-                    raise
+                except Exception as e:
+                    if "reasoning" in str(e).lower() and "not supported" in str(e).lower():
+                        reasoning_supported = False
+                        or_kwargs.pop("reasoning_effort", None)
+                        print(f"\n⚠  WARNING: {model_name} does not support reasoning. --effort will be ignored.\n", file=sys.stderr)
+                        response = await client.chat.completions.create(**or_kwargs)
+                    else:
+                        raise
 
-            if not response.choices:
-                empty_choice_retries += 1
-                if empty_choice_retries >= 3:
-                    raise RuntimeError(f"OpenRouter returned empty choices {empty_choice_retries} times consecutively")
-                print(f"[react/openrouter] Warning: response.choices is None/empty, retrying ({empty_choice_retries}/3)...", file=sys.stderr)
-                await asyncio.sleep(min(2 ** empty_choice_retries, 30))
-                continue
-            empty_choice_retries = 0
+                if not response.choices:
+                    empty_choice_retries += 1
+                    if empty_choice_retries >= 3:
+                        raise RuntimeError(f"OpenRouter returned empty choices {empty_choice_retries} times consecutively")
+                    print(f"[react/openrouter] Warning: response.choices is None/empty, retrying ({empty_choice_retries}/3)...", file=sys.stderr)
+                    await asyncio.sleep(min(2 ** empty_choice_retries, 30))
+                    continue
+                empty_choice_retries = 0
 
-            choice = response.choices[0]
-            msg = choice.message
+                choice = response.choices[0]
+                msg = choice.message
 
-            if response.usage:
-                total_input += response.usage.prompt_tokens
-                total_output += response.usage.completion_tokens
+                if response.usage:
+                    total_input += response.usage.prompt_tokens
+                    total_output += response.usage.completion_tokens
 
             # Build serializable assistant message
-            assistant_msg: dict[str, Any] = {
-                "role": "assistant",
-                "content": msg.content,
-            }
-            if msg.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
+            if cache_hit:
+                assistant_msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": cached_response.text_content,
+                }
+                if cached_response.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments),
+                            },
+                        }
+                        for tc in cached_response.tool_calls
+                    ]
+            else:
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": msg.content,
+                }
+                if msg.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ]
 
-            _jsonl_write(log_file, {"type": "assistant", "provider": "openrouter", "raw": assistant_msg})
+            log_event_or: dict[str, Any] = {"type": "assistant", "provider": "openrouter", "raw": assistant_msg}
+            if cache_hit:
+                log_event_or["cache_hit"] = True
+            _jsonl_write(log_file, log_event_or)
             if rollout:
                 rollout.log_openai_completions(assistant_msg)
             messages.append(assistant_msg)
 
-            if not msg.tool_calls:
+            # Store in cache on miss
+            if not cache_hit and ctx.prefix_cache:
+                from firehorse.cache import serialize_response as _sr
+                from firehorse.agents.resum.providers.base import LLMResponse, ToolCallInfo
+                tc_infos = []
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        try:
+                            a = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                        except json.JSONDecodeError:
+                            a = {}
+                        tc_infos.append(ToolCallInfo(id=tc.id, name=tc.function.name, arguments=a))
+                resp = LLMResponse(
+                    raw_message=None, tool_calls=tc_infos,
+                    text_content=msg.content,
+                    input_tokens=response.usage.prompt_tokens if response.usage else None,
+                    output_tokens=response.usage.completion_tokens if response.usage else None,
+                )
+                ctx.prefix_cache.put(cache_key, _sr(resp), model=model_name, provider="openrouter")
+
+            has_tool_calls = bool(assistant_msg.get("tool_calls"))
+            if not has_tool_calls:
                 break
 
-            for tc in msg.tool_calls:
+            # Build unified tool call items
+            tool_call_items = []
+            if cache_hit:
+                for tc in cached_response.tool_calls:
+                    tool_call_items.append({"id": tc.id, "name": tc.name, "arguments": tc.arguments})
+            else:
+                for tc in msg.tool_calls:
+                    try:
+                        a = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except json.JSONDecodeError:
+                        a = {}
+                    tool_call_items.append({"id": tc.id, "name": tc.function.name, "arguments": a})
+
+            for tc in tool_call_items:
                 turns_used += 1
-                raw_args = tc.function.arguments
                 try:
-                    args = json.loads(raw_args) if raw_args else {}
-                except json.JSONDecodeError:
-                    args = {}
-                try:
-                    tr = await ctx.session.call_tool(tc.function.name, args)
+                    tr = await ctx.session.call_tool(tc["name"], tc["arguments"])
                     text = _format_tool_output(tr)
                     if tr.finished:
                         finished = True
@@ -775,7 +1027,7 @@ class ReactAgent(BaseAgent):
 
                     tool_msg = {
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": tc["id"],
                         "content": text,
                     }
                     _jsonl_write(log_file, {
@@ -794,7 +1046,7 @@ class ReactAgent(BaseAgent):
                 except Exception as e:
                     tool_msg = {
                         "role": "tool",
-                        "tool_call_id": tc.id,
+                        "tool_call_id": tc["id"],
                         "content": f"Error: {e}",
                     }
                     messages.append(tool_msg)
