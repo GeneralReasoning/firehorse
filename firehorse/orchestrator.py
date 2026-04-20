@@ -32,8 +32,8 @@ def _print_banner(
     print(f"Concurrency: {config.n_concurrent}", file=sys.stderr)
 
     # "Replaces built-in X" annotations only make sense for agents that actually
-    # ship Claude Code's built-in tools. Other agents (react, codex, openclaw,
-    # hermes, resum) use the env's native tools directly.
+    # ship Claude Code's built-in tools. Other agents (react, codex, resum)
+    # use the env's native tools directly.
     is_claude_code = config.agent == "claude-code"
     replaced_builtins = []
     if tools:
@@ -72,17 +72,6 @@ def _get_firehorse_version() -> str:
 
 
 async def run_evaluation(config: RunConfig) -> RunSummary:
-    # OpenClaw does not support Anthropic's native API endpoint — Anthropic
-    # models must go through OpenRouter when using the openclaw harness.
-    if config.agent == "openclaw" and config.model.startswith("anthropic/"):
-        print(
-            f"Error: OpenClaw harness does not support the Anthropic API endpoint "
-            f"(got model {config.model!r}). Route Claude models through OpenRouter, "
-            f"e.g. --model openrouter/anthropic/claude-sonnet-4-6.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
     # Validate provider credentials early
     if config.model.startswith("openrouter/") and not os.environ.get("OPENROUTER_API_KEY"):
         print("Error: OPENROUTER_API_KEY environment variable required for openrouter/ models", file=sys.stderr)

@@ -14,7 +14,7 @@
 
 🔥🐴 Firehorse is a library of agent harnesses for running models against [OpenReward environments](https://openreward.ai/environments).
 
-It bridges popular harnesses (Claude Code, Codex, Hermes, OpenClaw, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
+It bridges popular harnesses (Claude Code, Codex, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
 
 ## Table of Contents
 
@@ -33,7 +33,7 @@ It bridges popular harnesses (Claude Code, Codex, Hermes, OpenClaw, ReAct, ReSum
 
 ## Features
 
-- **Multiple agent types** — Claude Code, Codex, Hermes, OpenClaw (MCP-based), ReAct, and ReSum (with context compaction)
+- **Multiple agent types** — Claude Code, Codex, ReAct, and ReSum (with context compaction)
 - **Multi-provider** — Anthropic, OpenAI, Google Gemini, OpenRouter, or any OpenAI-compatible endpoint
 - **Concurrent execution** — run trials in parallel with configurable concurrency
 - **Structured logging** — JSONL trajectories, per-trial results, and aggregate run summaries
@@ -47,10 +47,9 @@ It bridges popular harnesses (Claude Code, Codex, Hermes, OpenClaw, ReAct, ReSum
 - **LLM provider API key** — Anthropic, OpenAI, Google, or OpenRouter
 
 For specific agents:
-- **`claude-code`** — requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
-- **`codex`** — requires [Codex CLI](https://github.com/openai/codex) installed
-- **`hermes`** — requires [Hermes CLI](https://github.com/NousResearch/hermes-agent) installed
-- **`openclaw`** — requires OpenClaw CLI installed (`npm install -g openclaw@latest`)
+- **`claude-code`** — requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed (tested with v2.1.88)
+- **`codex`** — requires [Codex CLI](https://github.com/openai/codex) installed (tested with v0.121.0)
+- **`gemini`** — requires [Gemini CLI](https://github.com/google/gemini-cli) installed (tested with v0.38.2)
 
 ## Installation
 
@@ -118,19 +117,7 @@ By default, environment tools that overlap with Claude Code built-ins (e.g. `bas
 
 Runs the [Codex CLI](https://github.com/openai/codex) with environment tools bridged via MCP. The built-in shell is sandboxed to read-only, and the agent uses environment-provided tools for all interactions. When the environment provides a `bash` tool, redundant filesystem tools (read, write, edit, grep, glob) are excluded from MCP by default. For non-OpenAI providers, a local auth-injecting proxy routes requests through OpenRouter.
 
-**Providers:** OpenAI, OpenRouter, custom
-
-### `hermes`
-
-Runs the [Hermes CLI](https://github.com/NousResearch/hermes-agent) from Nous Research with environment tools bridged via MCP. Hermes uses its own native planning and tool-use capabilities. The agent's session is exported after completion for structured rollout logging.
-
-**Providers:** Anthropic, OpenAI, Google, OpenRouter
-
-### `openclaw`
-
-Runs the OpenClaw CLI with environment tools bridged via MCP. OpenClaw uses its own native tools for file operations and terminal commands. Session transcripts are parsed from JSONL for rollout logging.
-
-**Providers:** Anthropic, OpenAI, Google, OpenRouter
+**Providers:** OpenAI only
 
 ### `react`
 
@@ -143,6 +130,12 @@ A lightweight Reason-Act loop that calls LLM APIs directly. Each turn, the model
 Extends the ReAct loop with automatic conversation compaction. When the context window fills up (80% threshold), the agent summarizes the conversation into a structured summary preserving file paths, code snippets, decisions, and pending tasks, then continues with a fresh context. Supports up to 3 compactions per trial and includes micro-compaction (clearing large tool outputs) as a first pass before full summarization. Designed for long-horizon tasks that would otherwise overflow the context window.
 
 **Providers:** Anthropic, OpenAI, Google, OpenRouter, custom
+
+### `gemini`
+
+Runs the [Gemini CLI](https://github.com/google/gemini-cli) with environment tools bridged via MCP, analogous to the `codex` agent for OpenAI models.
+
+**Providers:** Google only
 
 ## Thinking / Reasoning
 
@@ -191,7 +184,7 @@ Required:
   --model            Model identifier (e.g. anthropic/claude-sonnet-4-6)
 
 Options:
-  --agent            Agent type: claude-code, codex, hermes, openclaw, react, resum (default: claude-code)
+  --agent            Agent type: claude-code, codex, gemini, react, resum (default: claude-code)
   --variant          Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH)
   --split            Task split to evaluate (default: test)
   --n-concurrent     Max parallel trials (default: 1)
