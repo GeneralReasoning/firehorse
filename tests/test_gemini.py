@@ -11,6 +11,7 @@ from firehorse.agents.gemini import (
     _resolve_model_gemini,
     _compute_gemini_excluded_tools,
     _build_gemini_mcp_prompt,
+    _build_gemini_settings,
     _log_gemini_event_to_rollout,
 )
 
@@ -82,38 +83,63 @@ class TestComputeGeminiExcludedTools:
 
 
 # ---------------------------------------------------------------------------
+# _build_gemini_settings
+# ---------------------------------------------------------------------------
+
+class TestBuildGeminiSettings:
+    def test_disables_all_builtin_tools(self):
+        """Settings must set tools.coreTools to [] to disable built-in filesystem tools."""
+        settings = _build_gemini_settings({"OPENREWARD_API_KEY": "test"})
+        assert "tools" in settings
+        assert settings["tools"]["coreTools"] == []
+
+    def test_mcp_server_configured(self):
+        mcp_env = {"OPENREWARD_API_KEY": "key", "OPENREWARD_ENV_NAME": "Foo/Bar"}
+        settings = _build_gemini_settings(mcp_env)
+        assert "mcpServers" in settings
+        assert "openreward" in settings["mcpServers"]
+        srv = settings["mcpServers"]["openreward"]
+        assert srv["args"] == ["-m", "firehorse.mcp"]
+        assert srv["env"] == mcp_env
+
+    def test_max_turns_included(self):
+        settings = _build_gemini_settings({}, max_turns=50)
+        assert settings["max_turns"] == 50
+
+    def test_max_turns_capped_at_100(self):
+        settings = _build_gemini_settings({}, max_turns=200)
+        assert settings["max_turns"] == 100
+
+    def test_no_max_turns_omitted(self):
+        settings = _build_gemini_settings({}, max_turns=None)
+        assert "max_turns" not in settings
+
+
+# ---------------------------------------------------------------------------
 # _build_gemini_mcp_prompt
 # ---------------------------------------------------------------------------
 
 class TestBuildGeminiMcpPrompt:
-    def test_bash_prompt_mentions_mcp_bash(self):
+    def test_includes_episode_complete(self):
         result = _build_gemini_mcp_prompt(["bash", "answer"], excluded=[])
-        assert "bash" in result.lower()
-        assert "built-in shell" in result.lower()
         assert "EPISODE COMPLETE" in result
-
-    def test_excluded_tools_not_listed(self):
-        result = _build_gemini_mcp_prompt(
-            ["bash", "read", "write", "answer"],
-            excluded=["read", "write"],
-        )
-        assert "answer" in result
-        assert "`read`" not in result
-        assert "`write`" not in result
 
     def test_empty_available_returns_empty(self):
         result = _build_gemini_mcp_prompt(["bash"], excluded=["bash"])
         assert result == ""
 
-    def test_no_bash_lists_other_tools(self):
-        result = _build_gemini_mcp_prompt(["answer", "submit"], excluded=[])
-        assert "answer" in result
-        assert "submit" in result
-        assert "Primary tool" not in result
+    def test_no_builtin_warnings(self):
+        """Prompt should not warn about built-ins — they are disabled via coreTools."""
+        result = _build_gemini_mcp_prompt(["bash", "answer"], excluded=[])
+        assert "built-in" not in result.lower()
+        assert "do not use" not in result.lower()
 
-    def test_mentions_not_using_builtin(self):
-        result = _build_gemini_mcp_prompt(["bash"], excluded=[])
-        assert "built-in" in result.lower()
+    def test_no_tool_listing(self):
+        """Tools are visible via function declarations; no need to list in prompt."""
+        result = _build_gemini_mcp_prompt(["bash", "answer", "read"], excluded=[])
+        assert "`bash`" not in result
+        assert "`answer`" not in result
+        assert "`read`" not in result
 
 
 # ---------------------------------------------------------------------------

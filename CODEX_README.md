@@ -35,10 +35,6 @@ firehorse --agent codex --model openai/gpt-5-codex --env <namespace/environment>
 # Run with GPT-5 Codex (direct OpenAI)
 firehorse --agent codex --model openai/gpt-5-codex --env GeneralReasoning/KellyBench
 
-# Run via OpenRouter
-export OPENROUTER_API_KEY=sk-or-...
-firehorse --agent codex --model openrouter/openai/gpt-4.1 --env GeneralReasoning/KellyBench
-
 # Run with GPT-4.1 and limit tasks
 firehorse --agent codex --model openai/gpt-4.1 --env GeneralReasoning/portfolio --max-tasks 5
 
@@ -54,10 +50,11 @@ firehorse --agent codex --model openai/gpt-5-codex --env GeneralReasoning/KellyB
 
 ## Supported Models
 
+> **Note:** Only OpenAI models are currently supported with the Codex agent. OpenRouter is not compatible due to OpenRouter injecting non-standard tool types (`openrouter:datetime`, `openrouter:web_search`, etc.) that the Codex CLI's Responses API format cannot parse.
+
 | Prefix | Example | Notes |
 |--------|---------|-------|
 | `openai/` | `openai/gpt-5-codex`, `openai/gpt-4.1` | Direct OpenAI access |
-| `openrouter/` | `openrouter/openai/gpt-4.1` | Via model_providers config. Requires `OPENROUTER_API_KEY` |
 
 ## How It Works
 

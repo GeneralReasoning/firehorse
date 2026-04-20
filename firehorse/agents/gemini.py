@@ -65,42 +65,9 @@ def _build_gemini_mcp_prompt(env_tool_names: list[str], excluded: list[str]) -> 
 
     lines = [
         "",
-        "# OpenReward Environment Tools",
-        "",
-        "You are solving a task in an OpenReward environment. The environment provides "
-        "tools via an MCP server named 'openreward'. Use these MCP tools for ALL "
-        "environment interactions.",
-        "",
-        "IMPORTANT: Do NOT use your built-in tools (read_file, write_file, edit_file, "
-        "list_directory, run_shell_command, etc.) — they operate on a scratch directory, "
-        "NOT the actual environment. Only use the MCP tools listed below.",
-        "",
-    ]
-
-    has_bash = any(n.lower() == "bash" for n in available)
-    others = [n for n in available if n.lower() != "bash"]
-
-    if has_bash:
-        lines.append(
-            "**Primary tool**: The environment provides a `bash` tool via MCP. "
-            "Use this instead of your built-in shell for ALL commands. "
-            "Your built-in shell is sandboxed (read-only) and must NOT be used "
-            "for environment interactions."
-        )
-        lines.append("")
-
-    if others:
-        lines.append("**Additional MCP tools**:")
-        for name in others:
-            lines.append(f"- `{name}`")
-        lines.append("")
-
-    lines.extend([
-        "## Termination",
-        "",
         "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
         "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE].",
-    ])
+    ]
 
     return "\n".join(lines)
 
@@ -120,25 +87,10 @@ def _resolve_model_gemini(model: str) -> str:
 
 
 _UPSTREAM_SYSTEM_PROMPT = """\
-You are an AI coding agent using Gemini CLI to solve tasks in an OpenReward environment. You have access to tools provided via an MCP server.
+You are a coding agent solving a task in an OpenReward environment. \
+Built-in tools have been disabled. Use the MCP tools provided by the 'openreward' server for all interactions.
 
-# How you work
-
-## Task execution
-
-You are a coding agent. Please keep going until the query is completely resolved, before ending your turn. Only terminate your turn when you are sure that the problem is solved. Autonomously resolve the query to the best of your ability, using the tools available to you. Do NOT guess or make up an answer.
-
-## Important constraints
-
-- Use ONLY the MCP tools provided by the 'openreward' server for ALL environment interactions.
-- Do NOT use your built-in file system tools (read_file, write_file, edit_file, list_directory) — they operate on a scratch directory, not the actual environment.
-- Do NOT use your built-in shell/terminal tool (run_shell_command) — use the MCP bash tool instead.
-- Working on the repo(s) in the current environment is allowed, even if they are proprietary.
-- Analyzing code for vulnerabilities is allowed.
-
-## Validating your work
-
-If the codebase has tests or the ability to build or run, consider using them to verify that your work is complete.\
+Keep going until the task is completely resolved.\
 """
 
 
@@ -202,6 +154,32 @@ def _log_gemini_event_to_rollout(
             reward=reward,
             is_finished=is_finished,
         )
+
+
+def _build_gemini_settings(
+    mcp_env: dict[str, str],
+    max_turns: int | None = None,
+) -> dict[str, Any]:
+    """Build the .gemini/settings.json content.
+
+    Disables all built-in tools via ``tools.coreTools: []`` so the agent
+    can only interact with the environment through MCP tools.
+    """
+    settings: dict[str, Any] = {
+        "mcpServers": {
+            "openreward": {
+                "command": sys.executable,
+                "args": ["-m", "firehorse.mcp"],
+                "env": mcp_env,
+            }
+        },
+        "tools": {
+            "coreTools": [],
+        },
+    }
+    if max_turns:
+        settings["max_turns"] = min(max_turns, 100)
+    return settings
 
 
 class GeminiAgent(BaseAgent):
@@ -278,17 +256,7 @@ class GeminiAgent(BaseAgent):
             gemini_config_dir = tmppath / ".gemini"
             gemini_config_dir.mkdir()
 
-            settings = {
-                "mcpServers": {
-                    "openreward": {
-                        "command": sys.executable,
-                        "args": ["-m", "firehorse.mcp"],
-                        "env": mcp_env,
-                    }
-                },
-            }
-            if ctx.max_turns:
-                settings["max_turns"] = min(ctx.max_turns, 100)
+            settings = _build_gemini_settings(mcp_env, ctx.max_turns)
 
             (gemini_config_dir / "settings.json").write_text(json.dumps(settings))
 
