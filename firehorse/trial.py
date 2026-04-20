@@ -35,9 +35,14 @@ async def run_trial(
 ) -> TrialResult:
     start = time.monotonic()
 
-    # claude-code and codex have matching SDK toolsets that provide their
-    # built-in tool descriptions; other agents use their own native tools.
-    toolset_name = agent.name if agent.name in ("claude-code", "codex") else None
+    # Map agent names to SDK toolset names. These toolsets provide optimized
+    # tool descriptions for each agent type.
+    _AGENT_TO_TOOLSET = {
+        "claude-code": "claude-code",
+        "codex": "codex",
+        "gemini": "gemini-cli",
+    }
+    toolset_name = _AGENT_TO_TOOLSET.get(agent.name)
 
     try:
         session_secrets = config.secrets or None

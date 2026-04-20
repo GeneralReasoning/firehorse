@@ -1,7 +1,7 @@
 """Integration tests for the CodexAgent that call a real Codex CLI + provider.
 
 These tests require:
-  - ``codex`` CLI installed (``bun add -g @openai/codex@0.120`` or similar)
+  - ``codex`` CLI installed (``bun add -g @openai/codex`` or similar)
   - ``OPENREWARD_API_KEY`` — to list tasks / log rollouts
   - ``OPENROUTER_API_KEY`` — used by the openrouter/ model path
 
@@ -31,19 +31,6 @@ def _has_key(env_var: str) -> bool:
     return bool(os.environ.get(env_var))
 
 
-def _codex_version() -> tuple[int, int, int] | None:
-    if shutil.which("codex") is None:
-        return None
-    try:
-        out = subprocess.run(
-            ["codex", "--version"], capture_output=True, text=True, timeout=10
-        ).stdout.strip()
-    except (subprocess.SubprocessError, OSError):
-        return None
-    from firehorse.agents.codex import _parse_codex_version
-    return _parse_codex_version(out)
-
-
 skip_no_codex = pytest.mark.skipif(
     shutil.which("codex") is None,
     reason="codex CLI not installed",
@@ -56,35 +43,6 @@ skip_no_openreward = pytest.mark.skipif(
     not _has_key("OPENREWARD_API_KEY"),
     reason="OPENREWARD_API_KEY not set",
 )
-
-
-# ---------------------------------------------------------------------------
-# Version-check unit tests (always run — don't need codex installed)
-# ---------------------------------------------------------------------------
-
-class TestCodexVersionGate:
-    def test_parse_version_from_codex_cli_output(self):
-        from firehorse.agents.codex import _parse_codex_version
-        assert _parse_codex_version("codex-cli 0.120.0") == (0, 120, 0)
-        assert _parse_codex_version("codex 0.65.0") == (0, 65, 0)
-
-    def test_parse_version_garbage_returns_none(self):
-        from firehorse.agents.codex import _parse_codex_version
-        assert _parse_codex_version("codex") is None
-        assert _parse_codex_version("") is None
-
-    def test_warn_on_unsupported_version(self, capsys):
-        from firehorse.agents.codex import _warn_if_unsupported_codex_version
-        _warn_if_unsupported_codex_version("codex-cli 0.121.0")
-        err = capsys.readouterr().err
-        assert "WARNING" in err
-        assert "0.121.0" in err
-        assert "@openai/codex@0.120" in err
-
-    def test_no_warning_on_supported_version(self, capsys):
-        from firehorse.agents.codex import _warn_if_unsupported_codex_version
-        _warn_if_unsupported_codex_version("codex-cli 0.120.0")
-        assert "WARNING" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -249,13 +207,6 @@ class TestCodexOpenRouterEndToEnd:
     """
 
     def test_single_task_completes_with_reward(self):
-        version = _codex_version()
-        if version is not None and version[:2] > (0, 120):
-            pytest.skip(
-                f"codex-cli {version[0]}.{version[1]}.x is known-broken with "
-                "openrouter (namespace tool shape rejected). Pin to 0.120."
-            )
-
         with tempfile.TemporaryDirectory() as tmpdir:
             proc = subprocess.run(
                 [

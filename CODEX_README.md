@@ -57,7 +57,7 @@ firehorse --agent codex --model openai/gpt-5-codex --env GeneralReasoning/KellyB
 | Prefix | Example | Notes |
 |--------|---------|-------|
 | `openai/` | `openai/gpt-5-codex`, `openai/gpt-4.1` | Direct OpenAI access |
-| `openrouter/` | `openrouter/openai/gpt-4.1` | Via local auth proxy. Requires `OPENROUTER_API_KEY` |
+| `openrouter/` | `openrouter/openai/gpt-4.1` | Via model_providers config. Requires `OPENROUTER_API_KEY` |
 
 ## How It Works
 
@@ -71,12 +71,12 @@ CodexAgent.run()
     |-- creates temp working directory
     |-- builds MCP server config (passed via -c dotted-path flags)
     |-- filters env tools (only bash exposed by default)
-    |-- (for openrouter/) starts local auth proxy
+    |-- (for openrouter/) configures model_provider with support_namespaces=false
     |-- launches: codex exec --json --sandbox read-only ...
     |
     v
 codex exec subprocess
-    |-- connects to API (direct or via proxy)
+    |-- connects to API (OpenAI direct, or OpenRouter/custom via model_provider config)
     |-- connects to MCP server (firehorse.mcp bridge)
     |-- receives environment tools via MCP
     |-- executes agent loop (tool calls + reasoning)
@@ -165,23 +165,19 @@ The JSONL events follow Codex's native format:
 | Cost tracking | Yes (`total_cost_usd` in result event) | No (Codex doesn't report cost) |
 | Token tracking | From `result` event | From `token_count` events |
 | Subagent support | Yes (tracks `parent_tool_use_id`) | No |
-| Provider support | Anthropic, OpenRouter, custom | OpenAI, OpenRouter (via local proxy) |
+| Provider support | Anthropic, OpenRouter, custom | OpenAI, OpenRouter, custom (via model_providers config) |
 
-### OpenRouter / Custom Provider Proxy
+### OpenRouter / Custom Providers
 
-Codex CLI v0.118+ uses the Responses API with WebSocket streaming. When `openai_base_url` is set, the HTTP fallback path does not pass the `Authorization` header (a Codex CLI limitation). Additionally, the request body is zstd-compressed.
-
-For OpenRouter and custom providers, the agent automatically starts a lightweight local proxy (`_openrouter_proxy.py`) that:
-1. Rejects WebSocket upgrades (returns 404) so Codex falls back to HTTP
-2. Decompresses zstd request bodies
-3. Injects the correct `Authorization: Bearer` header
-4. Streams SSE responses back to Codex
-
-The proxy runs on a random localhost port and is cleaned up when the trial completes.
+For non-OpenAI providers, the agent configures a custom `model_provider` via
+`-c model_providers.fh.*` flags. This sets the `base_url`, `env_key` (for
+bearer auth), `wire_api`, and `support_namespaces=false` (to avoid the
+`namespace` tool shape that OpenRouter's Responses API rejects). No local
+proxy is needed.
 
 ## Known Limitations
 
 - **No cost reporting**: Codex CLI doesn't emit cost data. The `cost_usd` field in results will be `None`.
 - **No subagent tracking**: Unlike Claude Code, Codex doesn't expose subagent/parent relationships in its event stream.
 - **Built-in shell still readable**: The `--sandbox read-only` mode blocks writes but the built-in shell can still read local files (e.g., `ls`, `cat`, `rg`). The system prompt instructs the agent to use MCP tools, but this isn't enforced for reads.
-- **OpenRouter token tracking**: Token usage is not reported when using OpenRouter (the v0.118 event format for proxied responses may omit `token_count` events).
+- **OpenRouter token tracking**: Token usage may not be reported when using OpenRouter.

@@ -14,7 +14,7 @@
 
 🔥🐴 Firehorse is a library of agent harnesses for running models against [OpenReward environments](https://openreward.ai/environments).
 
-It bridges popular harnesses (Claude Code, Codex, Hermes, OpenClaw, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
+It bridges popular harnesses (Claude Code, Codex, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
 
 ## Table of Contents
 
@@ -33,7 +33,7 @@ It bridges popular harnesses (Claude Code, Codex, Hermes, OpenClaw, ReAct, ReSum
 
 ## Features
 
-- **Multiple agent types** — Claude Code, Codex, Hermes, OpenClaw (MCP-based), ReAct, and ReSum (with context compaction)
+- **Multiple agent types** — Claude Code, Codex, ReAct, and ReSum (with context compaction)
 - **Multi-provider** — Anthropic, OpenAI, Google Gemini, OpenRouter, or any OpenAI-compatible endpoint
 - **Concurrent execution** — run trials in parallel with configurable concurrency
 - **Structured logging** — JSONL trajectories, per-trial results, and aggregate run summaries
@@ -49,8 +49,6 @@ It bridges popular harnesses (Claude Code, Codex, Hermes, OpenClaw, ReAct, ReSum
 For specific agents:
 - **`claude-code`** — requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
 - **`codex`** — requires [Codex CLI](https://github.com/openai/codex) installed
-- **`hermes`** — requires [Hermes CLI](https://github.com/NousResearch/hermes-agent) installed
-- **`openclaw`** — requires OpenClaw CLI installed (`npm install -g openclaw@latest`)
 
 ## Installation
 
@@ -120,18 +118,6 @@ Runs the [Codex CLI](https://github.com/openai/codex) with environment tools bri
 
 **Providers:** OpenAI, OpenRouter, custom
 
-### `hermes`
-
-Runs the [Hermes CLI](https://github.com/NousResearch/hermes-agent) from Nous Research with environment tools bridged via MCP. Hermes uses its own native planning and tool-use capabilities. The agent's session is exported after completion for structured rollout logging.
-
-**Providers:** Anthropic, OpenAI, Google, OpenRouter
-
-### `openclaw`
-
-Runs the OpenClaw CLI with environment tools bridged via MCP. OpenClaw uses its own native tools for file operations and terminal commands. Session transcripts are parsed from JSONL for rollout logging.
-
-**Providers:** Anthropic, OpenAI, Google, OpenRouter
-
 ### `react`
 
 A lightweight Reason-Act loop that calls LLM APIs directly. Each turn, the model receives the conversation history and available tools, produces a response with tool calls, and the harness executes them against the environment session. No subprocess, no MCP — just a direct API loop. Supports native tool-use formats for each provider (Anthropic Messages API, OpenAI Responses API, Google Gemini, OpenRouter Chat Completions).
@@ -191,7 +177,7 @@ Required:
   --model            Model identifier (e.g. anthropic/claude-sonnet-4-6)
 
 Options:
-  --agent            Agent type: claude-code, codex, hermes, openclaw, react, resum (default: claude-code)
+  --agent            Agent type: claude-code, codex, react, resum (default: claude-code)
   --variant          Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH)
   --split            Task split to evaluate (default: test)
   --n-concurrent     Max parallel trials (default: 1)
