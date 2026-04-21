@@ -138,14 +138,15 @@ class ReactAgent(BaseAgent):
         rollout = None
         if ctx.logging and ctx.rollout_client:
             try:
+                model_short = ctx.model.split("/")[-1]
                 rollout = ctx.rollout_client.rollout.create(
                     run_name=ctx.run_name,
-                    rollout_name=f"trial_{trial_id}",
+                    rollout_name=f"react_{model_short}_{trial_id}",
                     environment=ctx.env_name,
                     variant=ctx.variant,
                     split=ctx.split,
                     task_spec=ctx.task_spec,
-                    metadata={},
+                    metadata={"model": ctx.model, "agent": "react"},
                 )
                 print(
                     f"[react] Rollout: https://openreward.ai/rollout/{rollout.event_id}",
@@ -446,7 +447,7 @@ class ReactAgent(BaseAgent):
             }
             if ctx.effort and reasoning_supported:
                 mapped = "high" if ctx.effort == "max" else ctx.effort
-                resp_kwargs["reasoning"] = {"effort": mapped}
+                resp_kwargs["reasoning"] = {"effort": mapped, "summary": "auto"}
 
             try:
                 response = await client.responses.create(**resp_kwargs)
@@ -463,10 +464,24 @@ class ReactAgent(BaseAgent):
                 total_input += response.usage.input_tokens
                 total_output += response.usage.output_tokens
 
+            raw_items = []
+            for item in response.output:
+                entry: dict[str, Any] = {"type": getattr(item, "type", "unknown")}
+                if getattr(item, "type", None) == "reasoning":
+                    # Capture reasoning/thinking content
+                    summary = []
+                    for part in getattr(item, "summary", []):
+                        summary.append({"type": getattr(part, "type", "text"), "text": getattr(part, "text", "")})
+                    if summary:
+                        entry["summary"] = summary
+                elif getattr(item, "type", None) == "function_call":
+                    entry["name"] = getattr(item, "name", "")
+                    entry["call_id"] = getattr(item, "call_id", "")
+                raw_items.append(entry)
             _jsonl_write(log_file, {
                 "type": "assistant",
                 "provider": "openai",
-                "raw": [{"type": getattr(item, "type", "unknown")} for item in response.output],
+                "raw": raw_items,
             })
             if rollout:
                 rollout.log_openai_response(response)

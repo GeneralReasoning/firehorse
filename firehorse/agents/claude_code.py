@@ -463,14 +463,15 @@ class ClaudeCodeAgent(BaseAgent):
 
             if ctx.logging and ctx.rollout_client:
                 try:
+                    model_short = ctx.model.split("/")[-1]
                     main_rollout = ctx.rollout_client.rollout.create(
                         run_name=ctx.run_name,
-                        rollout_name=f"trial_{trial_id}",
+                        rollout_name=f"claude-code_{model_short}_{trial_id}",
                         environment=ctx.env_name,
                         variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"effort": ctx.effort},
+                        metadata={"effort": ctx.effort, "model": ctx.model, "agent": "claude-code"},
                     )
                     print(f"[claude-code] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}", file=sys.stderr)
                 except Exception as e:
