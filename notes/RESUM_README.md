@@ -237,8 +237,8 @@ Each provider includes a lookup table of known model context windows for proacti
 | Context window awareness | Built-in lookup + user override | Built-in | No |
 | Retry with backoff | Yes (per-provider) | Handled by Claude CLI | No |
 | Provider abstraction | `ProviderClient` ABC | N/A | Separate `_run_*` methods |
-| JSONL logging | Yes | Yes | No |
-| Rollout logging | Yes | Yes | No |
+| JSONL logging | Yes | Yes | Yes |
+| Rollout logging | Yes | Yes | Yes |
 
 ## File Layout
 

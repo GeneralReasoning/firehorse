@@ -87,9 +87,10 @@ class ReSumAgent(BaseAgent):
         rollout = None
         if ctx.logging and ctx.rollout_client:
             try:
+                model_short = ctx.model.split("/")[-1]
                 rollout = ctx.rollout_client.rollout.create(
                     run_name=ctx.run_name,
-                    rollout_name=f"trial_{trial_id}",
+                    rollout_name=f"resum_{model_short}_{trial_id}",
                     environment=ctx.env_name,
                     variant=ctx.variant,
                     split=ctx.split,
@@ -97,6 +98,8 @@ class ReSumAgent(BaseAgent):
                     metadata={
                         "provider": provider_name,
                         "effort": ctx.effort,
+                        "model": ctx.model,
+                        "agent": "resum",
                     },
                 )
                 print(

@@ -214,7 +214,7 @@ Required:
   --model            Model identifier (see Model Configuration above)
 
 Options:
-  --agent            Agent type (default: claude-code)
+  --agent            Agent type (default: resum)
   --n-concurrent     Max parallel trials (default: 1)
   --split            Task split (default: test)
   --max-tasks        Limit number of tasks

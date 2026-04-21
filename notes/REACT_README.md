@@ -125,15 +125,14 @@ output-dir/
 Each line is a JSON object with a `type` field:
 
 ```jsonl
-{"type": "system", "content": "You are an agent..."}
-{"type": "user", "content": "You are playing a counting game..."}
+{"type": "openreward_prompt", "system_prompt": "You are an agent...", "environment_prompt": "You are playing a counting game..."}
 {"type": "assistant", "provider": "anthropic", "raw": {"role": "assistant", "content": [...]}}
 {"type": "tool_result", "provider": "anthropic", "tool_use_id": "tu_001", "tool_name": "bash", "reward": null, "finished": false}
 {"type": "tool_results", "provider": "anthropic", "raw": {"role": "user", "content": [...]}}
 {"type": "openreward_summary", "task_spec": {...}, "reward": 1.0, "finished": true, ...}
 ```
 
-Each `tool_result` entry includes `reward` and `finished` from the environment's response. For batched providers (Anthropic, Google), individual `tool_result` entries are written per tool call, followed by the batched `tool_results` entry containing the raw provider message.
+The `openreward_prompt` bookend matches the format used by all other agents. Each `tool_result` entry includes `reward` and `finished` from the environment's response. For batched providers (Anthropic, Google), individual `tool_result` entries are written per tool call, followed by the batched `tool_results` entry containing the raw provider message.
 
 ### Per-Trial Result JSON
 
@@ -180,4 +179,4 @@ When logging is enabled (default), each trial is recorded as an OpenReward rollo
 pytest tests/test_react.py -v
 ```
 
-32 tests covering provider parsing, tool output formatting, per-provider core loops (mocked), max_turns enforcement, error handling, JSONL logging (including per-message reward/finished fields), and rollout logging.
+35 tests covering provider parsing, tool output formatting, per-provider core loops (mocked), max_turns enforcement, error handling, JSONL logging (including per-message reward/finished fields), and rollout logging.

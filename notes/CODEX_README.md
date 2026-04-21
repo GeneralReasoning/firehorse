@@ -50,7 +50,7 @@ firehorse --agent codex --model openai/gpt-5-codex --env GeneralReasoning/KellyB
 
 ## Supported Models
 
-> **Note:** Only OpenAI models are currently supported with the Codex agent. OpenRouter is not compatible due to OpenRouter injecting non-standard tool types (`openrouter:datetime`, `openrouter:web_search`, etc.) that the Codex CLI's Responses API format cannot parse.
+> **Note:** Only OpenAI models are supported with the Codex agent.
 
 | Prefix | Example | Notes |
 |--------|---------|-------|
@@ -112,9 +112,9 @@ Use `--use-all-filesystem-tools` to override this and expose all environment too
 
 Planning tools (`todo_write`) are always excluded from MCP — Codex's built-in versions are preferred.
 
-### Sandbox Policy
+### Approval & Sandbox Policy
 
-The built-in shell is **always sandboxed** with `--sandbox read-only`. This prevents the agent from using its built-in shell for writes or mutations — all environment interactions must go through MCP tools.
+The Codex subprocess runs with `--dangerously-bypass-approvals-and-sandbox`. This is required because all side-effects happen in the OpenReward environment via MCP — without this flag, Codex cancels every MCP tool call in exec mode since there's no interactive UI to approve them.
 
 The system prompt explicitly instructs the agent to use the MCP `bash` tool instead of the built-in shell.
 
@@ -139,15 +139,16 @@ output-dir/
   trial_<id>_result.json     # Per-trial summary (reward, finished, usage)
 ```
 
-The JSONL events follow Codex's native format:
+The JSONL wraps Codex's native event stream with firehorse bookend events:
 ```jsonl
-{"model":"gpt-5-codex","approval":"never","sandbox":"...","provider":"openai",...}
-{"prompt":"..."}
-{"id":"0","msg":{"type":"task_started","model_context_window":272000}}
-{"id":"0","msg":{"type":"mcp_tool_call_begin","call_id":"...","invocation":{...}}}
-{"id":"0","msg":{"type":"mcp_tool_call_end","call_id":"...","result":{"Ok":{...}}}}
-{"id":"0","msg":{"type":"agent_message","message":"..."}}
-{"id":"0","msg":{"type":"token_count","info":{"total_token_usage":{...}}}}
+{"type": "openreward_prompt", "system_prompt": "...", "environment_prompt": "..."}
+{"type":"thread.started","thread_id":"..."}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"..."}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","tool":"bash","arguments":{...},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","tool":"bash","result":{"content":[...]},"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":103779,"output_tokens":3509}}
+{"type": "openreward_summary", "task_spec": {...}, "env": "...", "model": "...", "usage": {...}}
 ```
 
 ## Differences from Claude Code Agent
@@ -160,21 +161,13 @@ The JSONL events follow Codex's native format:
 | Built-in tool control | `--disallowed-tools` (always disables filesystem built-ins) | `--sandbox read-only` (restricts built-in shell) |
 | Filesystem tool filtering | All env tools exposed via MCP | Only `bash` exposed by default (use `--use-all-filesystem-tools` for all) |
 | Cost tracking | Yes (`total_cost_usd` in result event) | No (Codex doesn't report cost) |
-| Token tracking | From `result` event | From `token_count` events |
+| Token tracking | From `result` event | From `turn.completed` events |
 | Subagent support | Yes (tracks `parent_tool_use_id`) | No |
-| Provider support | Anthropic, OpenRouter, custom | OpenAI, OpenRouter, custom (via model_providers config) |
-
-### OpenRouter / Custom Providers
-
-For non-OpenAI providers, the agent configures a custom `model_provider` via
-`-c model_providers.fh.*` flags. This sets the `base_url`, `env_key` (for
-bearer auth), `wire_api`, and `support_namespaces=false` (to avoid the
-`namespace` tool shape that OpenRouter's Responses API rejects). No local
-proxy is needed.
+| Provider support | Anthropic, OpenRouter, custom | OpenAI only |
 
 ## Known Limitations
 
 - **No cost reporting**: Codex CLI doesn't emit cost data. The `cost_usd` field in results will be `None`.
 - **No subagent tracking**: Unlike Claude Code, Codex doesn't expose subagent/parent relationships in its event stream.
-- **Built-in shell still readable**: The `--sandbox read-only` mode blocks writes but the built-in shell can still read local files (e.g., `ls`, `cat`, `rg`). The system prompt instructs the agent to use MCP tools, but this isn't enforced for reads.
+- **Built-in shell accessible**: The `--dangerously-bypass-approvals-and-sandbox` flag gives the built-in shell full access, but the system prompt instructs the agent to use MCP tools instead. The Codex subprocess runs in a temp directory so there's nothing meaningful on the local filesystem.
 - **OpenRouter token tracking**: Token usage may not be reported when using OpenRouter.

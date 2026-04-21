@@ -114,7 +114,7 @@ class OpenAIProvider(ProviderClient):
             kwargs["tools"] = tools
         if effort and self._reasoning_supported:
             mapped = "high" if effort == "max" else effort
-            kwargs["reasoning"] = {"effort": mapped}
+            kwargs["reasoning"] = {"effort": mapped, "summary": "auto"}
 
         last_err: Exception | None = None
         for attempt in range(5):
@@ -172,10 +172,17 @@ class OpenAIProvider(ProviderClient):
                     if block_type == "output_text":
                         text_parts.append(content_block.text)
             elif item_type == "reasoning":
-                for content_block in getattr(item, "content", None) or []:
+                # Try summary blocks first (populated when summary="auto")
+                for content_block in getattr(item, "summary", None) or []:
                     block_type = getattr(content_block, "type", None)
-                    if block_type == "reasoning_text":
+                    if block_type in ("summary_text", "reasoning_text"):
                         reasoning_parts.append(content_block.text)
+                # Fall back to content blocks
+                if not reasoning_parts:
+                    for content_block in getattr(item, "content", None) or []:
+                        block_type = getattr(content_block, "type", None)
+                        if block_type == "reasoning_text":
+                            reasoning_parts.append(content_block.text)
 
         return LLMResponse(
             raw_message=response,
