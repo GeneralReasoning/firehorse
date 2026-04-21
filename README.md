@@ -16,6 +16,8 @@
 
 It bridges popular harnesses (Claude Code, Codex, Gemini CLI, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
 
+**Note: This is an experimental library testing our new composable toolset features on OpenReward.**
+
 ## Quickstart
 
 Install the `firehorse` library:
