@@ -160,8 +160,11 @@ class ReactAgent(BaseAgent):
             log_file = open(log_dir / f"trial_{trial_id}.jsonl", "w")
 
         # Log initial prompt
-        _jsonl_write(log_file, {"type": "system", "content": SYSTEM_PROMPT})
-        _jsonl_write(log_file, {"type": "user", "content": ctx.prompt_text})
+        _jsonl_write(log_file, {
+            "type": "openreward_prompt",
+            "system_prompt": SYSTEM_PROMPT,
+            "environment_prompt": ctx.prompt_text,
+        })
 
         if rollout:
             rollout.log(

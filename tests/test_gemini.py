@@ -43,42 +43,37 @@ class TestResolveModelGemini:
 # ---------------------------------------------------------------------------
 
 class TestComputeGeminiExcludedTools:
-    def test_bash_present_excludes_filesystem_tools(self):
+    def test_excludes_generic_names(self):
         result = _compute_gemini_excluded_tools(
-            ["bash", "read", "write", "edit", "grep", "glob", "answer"],
+            ["bash", "read", "write", "edit", "grep", "glob", "run_shell_command", "read_file"],
         )
-        assert sorted(result) == ["edit", "glob", "grep", "read", "write"]
+        assert sorted(result) == ["bash", "edit", "glob", "grep", "read", "write"]
 
-    def test_no_bash_excludes_nothing(self):
+    def test_keeps_gemini_native_names(self):
         result = _compute_gemini_excluded_tools(
-            ["read", "write", "answer"],
+            ["bash", "run_shell_command", "read_file", "write_file", "replace", "grep_search"],
         )
-        assert result == []
+        excluded = set(r.lower() for r in result)
+        assert "run_shell_command" not in excluded
+        assert "read_file" not in excluded
+        assert "replace" not in excluded
 
     def test_use_all_filesystem_tools_keeps_everything(self):
         result = _compute_gemini_excluded_tools(
-            ["bash", "read", "write", "edit", "grep", "glob"],
+            ["bash", "read", "write", "edit"],
             use_all_filesystem_tools=True,
         )
         assert result == []
 
-    def test_always_use_builtin_excluded(self):
+    def test_todo_write_excluded(self):
         result = _compute_gemini_excluded_tools(
-            ["bash", "todo_write", "answer"],
+            ["bash", "todo_write", "write_todos"],
         )
         assert "todo_write" in result
+        assert "write_todos" not in result
 
     def test_empty_tools(self):
         result = _compute_gemini_excluded_tools([])
-        assert result == []
-
-    def test_bash_case_insensitive(self):
-        result = _compute_gemini_excluded_tools(["Bash", "Read", "Write"])
-        assert sorted(r.lower() for r in result) == ["read", "write"]
-
-    def test_bash_only_no_filesystem_tools(self):
-        """When env only provides bash and no other filesystem tools, nothing extra excluded."""
-        result = _compute_gemini_excluded_tools(["bash", "answer", "submit"])
         assert result == []
 
 
@@ -87,11 +82,10 @@ class TestComputeGeminiExcludedTools:
 # ---------------------------------------------------------------------------
 
 class TestBuildGeminiSettings:
-    def test_disables_all_builtin_tools(self):
-        """Settings must set tools.coreTools to [] to disable built-in filesystem tools."""
+    def test_no_tool_restrictions(self):
+        """Settings should not restrict tools — Gemini CLI auto-namespaces MCP tools."""
         settings = _build_gemini_settings({"OPENREWARD_API_KEY": "test"})
-        assert "tools" in settings
-        assert settings["tools"]["coreTools"] == []
+        assert "tools" not in settings
 
     def test_mcp_server_configured(self):
         mcp_env = {"OPENREWARD_API_KEY": "key", "OPENREWARD_ENV_NAME": "Foo/Bar"}
@@ -114,6 +108,22 @@ class TestBuildGeminiSettings:
         settings = _build_gemini_settings({}, max_turns=None)
         assert "max_turns" not in settings
 
+    def test_effort_sets_thinking_budget(self):
+        settings = _build_gemini_settings({}, effort="high")
+        assert settings["thinkingBudget"] == 16000
+
+    def test_effort_low(self):
+        settings = _build_gemini_settings({}, effort="low")
+        assert settings["thinkingBudget"] == 1024
+
+    def test_effort_max(self):
+        settings = _build_gemini_settings({}, effort="max")
+        assert settings["thinkingBudget"] == 24576
+
+    def test_no_effort_omits_thinking_budget(self):
+        settings = _build_gemini_settings({}, effort=None)
+        assert "thinkingBudget" not in settings
+
 
 # ---------------------------------------------------------------------------
 # _build_gemini_mcp_prompt
@@ -128,18 +138,16 @@ class TestBuildGeminiMcpPrompt:
         result = _build_gemini_mcp_prompt(["bash"], excluded=["bash"])
         assert result == ""
 
-    def test_no_builtin_warnings(self):
-        """Prompt should not warn about built-ins — they are disabled via coreTools."""
-        result = _build_gemini_mcp_prompt(["bash", "answer"], excluded=[])
-        assert "built-in" not in result.lower()
-        assert "do not use" not in result.lower()
+    def test_lists_shell_as_primary(self):
+        """Prompt should list run_shell_command as primary with openreward_ prefix."""
+        result = _build_gemini_mcp_prompt(["run_shell_command", "read_file"], excluded=[])
+        assert "`openreward_run_shell_command`" in result
 
-    def test_no_tool_listing(self):
-        """Tools are visible via function declarations; no need to list in prompt."""
-        result = _build_gemini_mcp_prompt(["bash", "answer", "read"], excluded=[])
-        assert "`bash`" not in result
-        assert "`answer`" not in result
-        assert "`read`" not in result
+    def test_lists_additional_tools_with_prefix(self):
+        """Prompt should list additional MCP tools with openreward_ prefix."""
+        result = _build_gemini_mcp_prompt(["run_shell_command", "read_file", "submit_answer"], excluded=[])
+        assert "`openreward_read_file`" in result
+        assert "`openreward_submit_answer`" in result
 
 
 # ---------------------------------------------------------------------------

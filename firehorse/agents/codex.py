@@ -218,31 +218,95 @@ def _extract_mcp_text(result_data: Any) -> str:
     return str(result_data)
 
 
+def _parse_reward_tag(content_str: str) -> tuple[float | None, bool]:
+    """Extract reward and finished flag from an ``[OR_REWARD:{...}]`` tag."""
+    m = re.search(r'\[OR_REWARD:(\{[^}]+\})\]', content_str)
+    if not m:
+        return None, False
+    try:
+        rd = json.loads(m.group(1))
+        return rd.get("r"), rd.get("f", False)
+    except (json.JSONDecodeError, AttributeError):
+        return None, False
+
+
 def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
-    """Parse a Codex stream-json event and log it to an OpenReward rollout."""
-    # v0.39: {"id":"0","msg":{"type":"...",...}}
-    # v0.118: {"type":"...",...}  (flat structure)
+    """Parse a Codex stream-json event and log it to an OpenReward rollout.
+
+    Handles three Codex CLI output schemas:
+
+    1. **v0.39 (nested)**: ``{"id":"0","msg":{"type":"agent_message",...}}``
+    2. **v0.118 (flat)**: ``{"type":"agent_message",...}``
+    3. **item-based (current CLI)**: ``{"type":"item.completed","item":{"type":"agent_message",...}}``
+       Also: ``turn.completed`` for token usage.
+    """
+    # --- Item-based format (current Codex CLI) ---
+    event_type = event.get("type", "")
+
+    if event_type in ("item.completed", "item.started"):
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return
+        item_type = item.get("type", "")
+
+        if item_type == "agent_message" and event_type == "item.completed":
+            text = item.get("text", "")
+            if text:
+                rollout.log(AssistantMessage(content=text))
+
+        elif item_type == "agent_reasoning" and event_type == "item.completed":
+            text = item.get("text", "")
+            summary = item.get("summary", "")
+            if text or summary:
+                rollout.log(ReasoningItem(content=text, summary=summary))
+
+        elif item_type == "mcp_tool_call":
+            if event_type == "item.started":
+                # Tool call initiation
+                rollout.log(ToolCall(
+                    name=item.get("tool", ""),
+                    content=json.dumps(item.get("arguments", {})),
+                    call_id=item.get("id", ""),
+                ))
+            elif event_type == "item.completed":
+                # Tool call result
+                result_data = item.get("result", "")
+                if isinstance(result_data, dict) and "Ok" in result_data:
+                    result_data = result_data["Ok"]
+                content_str = _extract_mcp_text(result_data)
+                reward, is_finished = _parse_reward_tag(content_str)
+                rollout.log(
+                    ToolResult(
+                        content=strip_or_reward_marker(content_str),
+                        call_id=item.get("id", ""),
+                    ),
+                    reward=reward,
+                    is_finished=is_finished,
+                )
+        return
+
+    # --- Legacy v0.39 (nested msg) / v0.118 (flat) formats ---
     msg = event.get("msg")
     if isinstance(msg, dict):
-        event_type = msg.get("type")
-    elif "type" in event:
+        msg_type = msg.get("type")
+    elif event_type not in ("turn.started", "turn.completed", "thread.started"):
         msg = event
-        event_type = event.get("type")
+        msg_type = event_type
     else:
         return
 
-    if event_type == "agent_message":
+    if msg_type == "agent_message":
         text = msg.get("message", "")
         if text:
             rollout.log(AssistantMessage(content=text))
 
-    elif event_type == "agent_reasoning":
+    elif msg_type == "agent_reasoning":
         text = msg.get("text", "")
         summary = msg.get("summary", "")
         if text or summary:
             rollout.log(ReasoningItem(content=text, summary=summary))
 
-    elif event_type == "mcp_tool_call_begin":
+    elif msg_type == "mcp_tool_call_begin":
         invocation = msg.get("invocation", {})
         if not isinstance(invocation, dict):
             return
@@ -252,24 +316,12 @@ def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
             call_id=msg.get("call_id", invocation.get("call_id", "")),
         ))
 
-    elif event_type == "mcp_tool_call_end":
+    elif msg_type == "mcp_tool_call_end":
         result_data = msg.get("result", "")
-        # Codex wraps MCP results in a Rust Result: {"Ok": {"content": [...], "isError": false}}
         if isinstance(result_data, dict) and "Ok" in result_data:
             result_data = result_data["Ok"]
         content_str = _extract_mcp_text(result_data)
-
-        # Parse [OR_REWARD:{...}] tag from MCP bridge output
-        reward = None
-        is_finished = False
-        m = re.search(r'\[OR_REWARD:(\{[^}]+\})\]', content_str)
-        if m:
-            try:
-                rd = json.loads(m.group(1))
-                reward = rd.get("r")
-                is_finished = rd.get("f", False)
-            except (json.JSONDecodeError, AttributeError):
-                pass
+        reward, is_finished = _parse_reward_tag(content_str)
 
         call_id = msg.get("call_id", "")
         if not call_id:
@@ -283,7 +335,7 @@ def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
             is_finished=is_finished,
         )
 
-    elif event_type == "exec_command_begin":
+    elif msg_type == "exec_command_begin":
         command = msg.get("command", [])
         cmd_str = " ".join(command) if isinstance(command, list) else str(command)
         rollout.log(ToolCall(
@@ -292,7 +344,7 @@ def _log_codex_event_to_rollout(event: dict, rollout: Any) -> None:
             call_id=msg.get("call_id", ""),
         ))
 
-    elif event_type == "exec_command_end":
+    elif msg_type == "exec_command_end":
         output = msg.get("aggregated_output", msg.get("stdout", ""))
         content_str = str(output)
         rollout.log(ToolResult(
@@ -505,14 +557,28 @@ class CodexAgent(BaseAgent):
                     if main_rollout:
                         _log_codex_event_to_rollout(event, main_rollout)
 
-                    # Track token usage from token_count events
-                    # Support both v0.39 (nested msg) and v0.118 (flat) formats
+                    # Track token usage and count turns.
+                    # Current Codex CLI uses item-based events; legacy used flat/nested.
+                    evt_type = event.get("type", "")
+
+                    # Token usage: current CLI emits turn.completed with usage dict
+                    if evt_type == "turn.completed":
+                        usage = event.get("usage")
+                        if isinstance(usage, dict):
+                            token_info = usage
+
+                    # Count MCP tool calls as turns (item.started with mcp_tool_call)
+                    if evt_type == "item.started":
+                        item = event.get("item", {})
+                        if isinstance(item, dict) and item.get("type") == "mcp_tool_call":
+                            turns_used += 1
+
+                    # Legacy format support (v0.39 nested msg / v0.118 flat)
                     msg = event.get("msg", event)
                     if isinstance(msg, dict):
                         msg_type = msg.get("type")
                         if msg_type == "token_count":
                             token_info = msg.get("info", {})
-                        # Count MCP tool calls and shell commands as turns
                         if msg_type in ("mcp_tool_call_begin", "exec_command_begin"):
                             turns_used += 1
 
@@ -545,14 +611,20 @@ class CodexAgent(BaseAgent):
                     except json.JSONDecodeError:
                         pass
 
-                # Extract token usage from last token_count event
+                # Extract token usage from last token/turn event.
+                # turn.completed has {input_tokens, output_tokens} directly;
+                # legacy token_count has {total_token_usage: {input_tokens, ...}}.
                 input_tokens = None
                 output_tokens = None
                 if token_info:
-                    total_usage = token_info.get("total_token_usage", {})
-                    if isinstance(total_usage, dict):
-                        input_tokens = total_usage.get("input_tokens")
-                        output_tokens = total_usage.get("output_tokens")
+                    if "input_tokens" in token_info:
+                        input_tokens = token_info.get("input_tokens")
+                        output_tokens = token_info.get("output_tokens")
+                    else:
+                        total_usage = token_info.get("total_token_usage", {})
+                        if isinstance(total_usage, dict):
+                            input_tokens = total_usage.get("input_tokens")
+                            output_tokens = total_usage.get("output_tokens")
 
                 if main_log:
                     summary_event = {

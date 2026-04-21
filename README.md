@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="https://docs.openreward.ai/">
-    <img src="https://img.shields.io/badge/docs-docs.openreward.ai-blue" alt="Docs">
+    <img src="https://img.shields.io/badge/docs-openreward.ai-blue" alt="Docs">
   </a>
   <img src="https://img.shields.io/badge/python-3.10+-blue" alt="Python 3.10+">
   <a href="LICENSE">
@@ -14,31 +14,34 @@
 
 🔥🐴 Firehorse is a library of agent harnesses for running models against [OpenReward environments](https://openreward.ai/environments).
 
-It bridges popular harnesses (Claude Code, Codex, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
+It bridges popular harnesses (Claude Code, Codex, Gemini CLI, ReAct, ReSum) with OpenReward, letting you sample agentic trajectories without setting up environment infrastructure. Firehorse manages concurrent trial execution and produces structured trajectory logs and aggregate results.
 
-## Table of Contents
+## Quickstart
 
-- [Features](#features)
-- [Prerequisites](#prerequisites)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Agent Types](#agent-types)
-- [Thinking / Reasoning](#thinking--reasoning)
-- [Environment Variables](#environment-variables)
-- [CLI Reference](#cli-reference)
-- [Output](#output)
-- [Contributing](#contributing)
-- [License](#license)
-- [Documentation](#documentation)
+Install the `firehorse` library:
 
-## Features
+```bash
+pip install firehorse-cli
+```
 
-- **Multiple agent types** — Claude Code, Codex, ReAct, and ReSum (with context compaction)
-- **Multi-provider** — Anthropic, OpenAI, Google Gemini, OpenRouter, or any OpenAI-compatible endpoint
-- **Concurrent execution** — run trials in parallel with configurable concurrency
-- **Structured logging** — JSONL trajectories, per-trial results, and aggregate run summaries
-- **OpenReward integration** — real-time rollout streaming to the OpenReward platform
-- **Secret management** — automatic provider key detection and per-trial secret injection
+Set up your environment variables - get an OpenReward key [here](https://openreward.ai/keys):
+
+```bash
+export OPENREWARD_API_KEY=your-openreward-key
+export OPENROUTER_API_KEY=your-openrouter-key # or other env if using diff model provider
+```
+
+Ensure you have the harness CLI installed (in this case Claude Code) and then run:
+
+```bash
+# Run Claude Code agent against an environment
+firehorse \
+  --env Eigent/SETA \
+  --agent claude-code \
+  --model openrouter/moonshotai/kimi-k2.6
+  --split train
+  --output-dir ./kimi-seta
+```
 
 ## Prerequisites
 
@@ -51,95 +54,19 @@ For specific agents:
 - **`codex`** — requires [Codex CLI](https://github.com/openai/codex) installed (tested with v0.121.0)
 - **`gemini`** — requires [Gemini CLI](https://github.com/google/gemini-cli) installed (tested with v0.38.2)
 
-## Installation
-
-```bash
-pip install firehorse-cli
-```
-
-Install with agent-specific extras for ReAct or ReSum:
-
-```bash
-pip install "firehorse-cli[react]"   # Anthropic, OpenAI, Google SDKs
-pip install "firehorse-cli[resum]"   # Same deps + context compaction support
-```
-
-## Quick Start
-
-```bash
-# Run Claude Code agent against an environment
-firehorse \
-  --env GeneralReasoning/terminal-bench-2-verified \
-  --agent claude-code \
-  --model anthropic/claude-sonnet-4-6
-
-# Run ReAct agent with OpenAI
-firehorse \
-  --env Eigent/SETA \
-  --agent react \
-  --model openai/gpt-5.4 \
-  --n-concurrent 4
-
-# Run via OpenRouter
-firehorse \
-  --env nebius/SWE-rebench-V2 \
-  --agent claude-code \
-  --model openrouter/z-ai/glm-5.1
-
-# Save results locally
-firehorse \
-  --env kanishk/EndlessTerminals \
-  --agent codex \
-  --model openrouter/z-ai/glm-5.1 \
-  --output-dir ./results
-
-# Pick a specific variant of a multi-variant environment
-firehorse \
-  --env GeneralReasoning/MATH \
-  --variant mathnocode \
-  --agent react \
-  --model anthropic/claude-sonnet-4-6
-```
-
 ## Agent Types
 
-### `claude-code` (default)
-
-Spawns the [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI as a subprocess and bridges environment tools to it via MCP. Claude Code's built-in filesystem tools (Read, Edit, Bash, etc.) are disabled — the agent interacts with the environment exclusively through the MCP server. This gives the agent access to Claude Code's full capabilities (extended thinking, sub-agents, web search) while keeping it sandboxed to the environment's tool surface.
-
-By default, environment tools that overlap with Claude Code built-ins (e.g. `bash`, `read`, `edit`) use Claude Code's own tool descriptions rather than the environment's. A system prompt mapping section tells the model which MCP tool names correspond to which built-ins (e.g. "use `mcp__openreward__bash` instead of `Bash`"). Pass `--use-env-descriptions` to use the environment's original descriptions instead.
-
-**Providers:** Anthropic, OpenRouter
-
-> **Note:** Claude Code's built-in context compaction does not work for non-Anthropic models via OpenRouter. OpenRouter reports per-turn token usage as zero for many providers, which prevents Claude Code from detecting when the context window is full. For long-horizon tasks with non-Anthropic models, use `--agent resum` instead, which implements its own compaction.
-
-### `codex`
-
-Runs the [Codex CLI](https://github.com/openai/codex) with environment tools bridged via MCP. The built-in shell is sandboxed to read-only, and the agent uses environment-provided tools for all interactions. When the environment provides a `bash` tool, redundant filesystem tools (read, write, edit, grep, glob) are excluded from MCP by default. For non-OpenAI providers, a local auth-injecting proxy routes requests through OpenRouter.
-
-**Providers:** OpenAI only
-
-### `react`
-
-A lightweight Reason-Act loop that calls LLM APIs directly. Each turn, the model receives the conversation history and available tools, produces a response with tool calls, and the harness executes them against the environment session. No subprocess, no MCP — just a direct API loop. Supports native tool-use formats for each provider (Anthropic Messages API, OpenAI Responses API, Google Gemini, OpenRouter Chat Completions).
-
-**Providers:** Anthropic, OpenAI, Google, OpenRouter, custom
-
-### `resum`
-
-Extends the ReAct loop with automatic conversation compaction. When the context window fills up (80% threshold), the agent summarizes the conversation into a structured summary preserving file paths, code snippets, decisions, and pending tasks, then continues with a fresh context. Supports up to 3 compactions per trial and includes micro-compaction (clearing large tool outputs) as a first pass before full summarization. Designed for long-horizon tasks that would otherwise overflow the context window.
-
-**Providers:** Anthropic, OpenAI, Google, OpenRouter, custom
-
-### `gemini`
-
-Runs the [Gemini CLI](https://github.com/google/gemini-cli) with environment tools bridged via MCP, analogous to the `codex` agent for OpenAI models.
-
-**Providers:** Google only
+| Agent | Description | Providers |
+|-------|-------------|-----------|
+| `resum` (default) | ReAct loop with compaction when context fills up | Anthropic, OpenAI, Google, OpenRouter, custom |
+| `claude-code` | Claude Code CLI with environment tools via MCP | Anthropic, OpenRouter |
+| `codex` | Codex CLI with environment tools via MCP | OpenAI |
+| `react` | Direct LLM API Reason-Act loop| Anthropic, OpenAI, Google, OpenRouter, custom |
+| `gemini` | Gemini CLI with environment tools via MCP | Google |
 
 ## Thinking / Reasoning
 
-The `--effort` flag controls how much thinking/reasoning the model does. It's supported by `claude-code`, `react`, and `resum` agents. Omitting the flag (or passing `--effort none`) leaves the reasoning parameter unset so each provider uses its own default. The effort level maps to each provider's native thinking mechanism:
+The `--effort` flag controls how much thinking/reasoning the model does. It's supported by all agents. Omitting the flag (or passing `--effort none`) leaves the reasoning parameter unset so each provider uses its own default. The effort level maps to each provider's native thinking mechanism:
 
 | Provider | Mechanism | low | medium | high | max |
 |---|---|---|---|---|---|
@@ -150,29 +77,16 @@ The `--effort` flag controls how much thinking/reasoning the model does. It's su
 
 ```bash
 # High thinking (opt-in; default is no effort flag — provider picks its own default)
-firehorse --env GeneralReasoning/portfolio --model anthropic/claude-sonnet-4-6 --effort high
+firehorse --env GeneralReasoning/CTF --model anthropic/claude-sonnet-4-6 --effort high
 
 # Max thinking for deep reasoning tasks
-firehorse --env Naman/R2E-Gym --model anthropic/claude-opus-4-6 --effort max
+firehorse --env Naman/R2E-Gym --agent codex --model openai/gpt-5.4 --split all --effort xhigh
 
 # Low thinking for speed
 firehorse --env collinear/YC-Bench --agent react --model google/gemini-3.1-flash-lite-preview --effort low
 ```
 
-For `claude-code`, `--effort` is only passed to Anthropic models. For `react` and `resum`, it's mapped to the appropriate provider parameter automatically. Models that don't support thinking (e.g., GPT-4.1) ignore the flag.
-
-## Environment Variables
-
-```bash
-# Required
-OPENREWARD_API_KEY=<your-api-key>
-
-# LLM provider (set the one you need)
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GEMINI_API_KEY=...
-OPENROUTER_API_KEY=sk-or-...
-```
+Each agent maps `--effort` to its provider's native parameter. Models that don't support thinking (e.g., GPT-4.1) ignore the flag.
 
 ## CLI Reference
 
@@ -184,14 +98,14 @@ Required:
   --model            Model identifier (e.g. anthropic/claude-sonnet-4-6)
 
 Options:
-  --agent            Agent type: claude-code, codex, gemini, react, resum (default: claude-code)
-  --variant          Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH)
+  --agent            Agent type: claude-code, codex, gemini, react, resum (default: resum)
+  --variant          Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH) (default: none)
   --split            Task split to evaluate (default: test)
   --n-concurrent     Max parallel trials (default: 1)
   --max-tasks        Limit number of tasks to evaluate
   --max-turns        Max tool call turns per trial
   --run-name         Name for this evaluation run
-  --effort           Thinking effort: none, low, medium, high, max (default: none — use model default)
+  --effort           Thinking effort: none, low, medium, high, max, xhigh (default: none — use model default)
   --provider-url     Custom API base URL for non-standard endpoints
   --output-dir       Directory for JSONL trajectory logs and results
   --secret KEY=VAL   Inject a session secret (repeatable)
@@ -225,6 +139,30 @@ Each trial result includes:
 | `output_tokens` | Total output tokens consumed |
 | `cost_usd` | Estimated API cost |
 | `duration_seconds` | Wall-clock time |
+
+### JSONL Trajectory Format
+
+All agents share the same bookend events in `trial_*.jsonl`:
+
+```jsonl
+{"type": "openreward_prompt", "system_prompt": "...", "environment_prompt": "..."}
+... agent-specific events ...
+{"type": "openreward_summary", "task_spec": {...}, "env": "...", "model": "...", "usage": {...}}
+```
+
+The events in between depend on whether the agent is API-based or CLI-based.
+
+**API agents** (`react`, `resum`) produce normalized firehorse events:
+- `assistant` — model response with text, reasoning, and tool calls
+- `tool_call` — tool invocation with name, arguments, and call ID (resum only; react embeds in the assistant event)
+- `tool_result` — tool output with explicit `reward` and `finished` fields
+
+**CLI agents** (`claude-code`, `codex`, `gemini`) pass through the raw CLI stream format:
+- **claude-code**: Claude's `stream-json` events (`assistant`/`user` with `message.content` blocks)
+- **codex**: Codex's `--json` events (`item.started`/`item.completed` with nested `item.type`)
+- **gemini**: Gemini's `stream-json` events (`message` deltas, `tool_use`, `tool_result`)
+
+Reward signals are available in the `trial_*_rewards.jsonl` sidecar file and in OpenReward rollouts.
 
 ## Contributing
 

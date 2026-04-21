@@ -699,10 +699,15 @@ class TestEdgeCases:
 
             events = [json.loads(line) for line in jsonl_path.read_text().strip().split("\n")]
             types = [e["type"] for e in events]
-            assert "system" in types
-            assert "user" in types
+            assert "openreward_prompt" in types
             assert "assistant" in types
             assert "openreward_summary" in types
+
+            # Verify prompt event structure
+            prompt_event = events[0]
+            assert prompt_event["type"] == "openreward_prompt"
+            assert "system_prompt" in prompt_event
+            assert "environment_prompt" in prompt_event
 
             # Check result JSON
             result_path = Path(tmpdir) / "trial_test_task_result.json"

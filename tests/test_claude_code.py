@@ -256,6 +256,43 @@ class TestLogEventToRollout:
         types = [type(item[0]).__name__ for item in rollout.logged]
         assert types == ["ReasoningItem", "ReasoningItem", "AssistantMessage", "ToolCall"]
 
+    def test_duplicate_thinking_and_redacted_thinking_deduped_same_event(self):
+        """Same content in one event: logged only once."""
+        text = "The user wants me to download a file"
+        reasoning = json.dumps({"text": text, "type": "reasoning.text"})
+        b64 = base64.b64encode(reasoning.encode()).decode()
+        rollout = _FakeRollout()
+        event = {
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "thinking", "thinking": text, "summary": ""},
+                {"type": "redacted_thinking", "data": f"openrouter.reasoning:{b64}"},
+            ]},
+        }
+        _log_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 1
+        assert rollout.logged[0][0].content == text
+
+    def test_duplicate_thinking_and_redacted_thinking_deduped_across_events(self):
+        """Kimi K2.5 sends thinking and redacted_thinking as separate stream events."""
+        text = "The user wants me to download a file"
+        reasoning = json.dumps({"text": text, "type": "reasoning.text"})
+        b64 = base64.b64encode(reasoning.encode()).decode()
+        rollout = _FakeRollout()
+        seen = set()
+        event1 = {
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": text, "summary": ""}]},
+        }
+        event2 = {
+            "type": "assistant",
+            "message": {"content": [{"type": "redacted_thinking", "data": f"openrouter.reasoning:{b64}"}]},
+        }
+        _log_event_to_rollout(event1, rollout, seen_reasoning=seen)
+        _log_event_to_rollout(event2, rollout, seen_reasoning=seen)
+        assert len(rollout.logged) == 1
+        assert rollout.logged[0][0].content == text
+
     def test_tool_result_extracts_reward(self):
         rollout = _FakeRollout()
         event = {
