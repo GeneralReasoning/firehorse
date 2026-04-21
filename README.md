@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://docs.openreward.ai/">
+  <a href="https://docs.openreward.ai/harnesses/quickstart">
     <img src="https://img.shields.io/badge/docs-openreward.ai-blue" alt="Docs">
   </a>
   <img src="https://img.shields.io/badge/python-3.10+-blue" alt="Python 3.10+">
