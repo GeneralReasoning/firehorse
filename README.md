@@ -59,7 +59,7 @@ For specific agents:
 | Agent | Description | Providers |
 |-------|-------------|-----------|
 | `resum` (default) | ReAct loop with compaction when context fills up | Anthropic, OpenAI, Google, OpenRouter, custom |
-| `claude-code` | Claude Code CLI with environment tools via MCP | Anthropic, OpenRouter |
+| `claude-code` | Claude Code CLI with environment tools via MCP | Anthropic, OpenAI, Google, OpenRouter |
 | `codex` | Codex CLI with environment tools via MCP | OpenAI |
 | `react` | Direct LLM API Reason-Act loop| Anthropic, OpenAI, Google, OpenRouter, custom |
 | `gemini` | Gemini CLI with environment tools via MCP | Google |
