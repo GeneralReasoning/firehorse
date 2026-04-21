@@ -21,13 +21,11 @@ from openreward.models import RolloutInfo
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.mcp.convert import strip_or_reward_marker
 
-# Env tools with these names are always excluded from MCP —
-# the agent's own built-in versions are preferred for planning/tracking.
-ALWAYS_USE_BUILTIN = {"todo_write", "todowrite"}
-
-# Filesystem tool names that are redundant when the env provides bash.
-# By default, only bash is exposed via MCP for Gemini (bash can do everything).
-GEMINI_FILESYSTEM_TOOLS = {"read", "write", "edit", "grep", "glob"}
+# Generic env tool names to exclude when gemini-cli toolset is active.
+# The toolset provides both generic names (bash, read, write, ...) and
+# gemini-native names (run_shell_command, read_file, write_file, ...).
+# We exclude the generic names so only gemini-native names are exposed.
+_GENERIC_TOOL_NAMES = {"bash", "edit", "grep", "read", "write", "glob", "todo_write"}
 
 
 def _compute_gemini_excluded_tools(
@@ -36,38 +34,64 @@ def _compute_gemini_excluded_tools(
 ) -> list[str]:
     """Return env tool names that should be excluded from MCP for Gemini.
 
-    When the environment provides ``bash``, the other filesystem tools
-    (read, write, edit, grep, glob) are redundant — bash can do everything.
-    By default they are excluded from MCP so the model only sees bash.
-    Pass ``use_all_filesystem_tools=True`` to expose all of them.
+    Excludes generic tool names (bash, read, write, etc.) so only the
+    gemini-native names from the gemini-cli toolset are exposed
+    (run_shell_command, read_file, write_file, etc.).
     """
-    exclude = [n for n in env_tool_names if n.lower() in ALWAYS_USE_BUILTIN]
-
     if use_all_filesystem_tools:
-        return exclude
+        return []
 
-    names_lower = {n.lower() for n in env_tool_names}
-    if "bash" in names_lower:
-        for n in env_tool_names:
-            if n.lower() in GEMINI_FILESYSTEM_TOOLS:
-                exclude.append(n)
-
-    return exclude
+    return [n for n in env_tool_names if n.lower() in _GENERIC_TOOL_NAMES]
 
 
-def _build_gemini_mcp_prompt(env_tool_names: list[str], excluded: list[str]) -> str:
-    """Build the MCP tools section appended to the Gemini system prompt."""
+# Gemini CLI auto-prefixes MCP tools as "{server_name}_".
+_GEMINI_MCP_SERVER_NAME = "openreward"
+
+
+def _build_gemini_mcp_prompt(
+    env_tool_names: list[str],
+    excluded: list[str],
+) -> str:
+    """Build the MCP tools section appended to the Gemini system prompt.
+
+    Tool names are prefixed with ``openreward_`` to match how the Gemini CLI
+    exposes MCP tools (it auto-namespaces them as ``{server}_{tool}``).
+    """
     excluded_lower = {n.lower() for n in excluded}
     available = [n for n in env_tool_names if n.lower() not in excluded_lower]
 
     if not available:
         return ""
 
+    prefix = f"{_GEMINI_MCP_SERVER_NAME}_"
+    has_shell = any(n.lower() == "run_shell_command" for n in available)
+    others = [n for n in available if n.lower() != "run_shell_command"]
+
     lines = [
         "",
+        "# Available MCP Tools",
+        "",
+        "The following tools are provided via the 'openreward' MCP server. "
+        "Use ONLY these tools for all environment interactions.",
+        "",
+    ]
+
+    if has_shell:
+        lines.append(
+            f"**Primary tool**: `{prefix}run_shell_command` — use this for ALL shell commands."
+        )
+        lines.append("")
+
+    if others:
+        lines.append("**Additional tools**:")
+        for name in others:
+            lines.append(f"- `{prefix}{name}`")
+        lines.append("")
+
+    lines.extend([
         "When a tool result contains [EPISODE COMPLETE], stop working immediately — "
         "the task is done. Do not make any more tool calls after seeing [EPISODE COMPLETE].",
-    ]
+    ])
 
     return "\n".join(lines)
 
@@ -129,7 +153,8 @@ def _log_gemini_event_to_rollout(
         ))
 
     elif event_type == "tool_result":
-        content_str = event.get("content", event.get("status", ""))
+        # Gemini CLI puts tool output in "output" field, not "content"
+        content_str = event.get("output", event.get("content", event.get("status", "")))
         if isinstance(content_str, dict):
             content_str = json.dumps(content_str)
         content_str = str(content_str)
@@ -156,14 +181,18 @@ def _log_gemini_event_to_rollout(
         )
 
 
+_EFFORT_TO_THINKING_BUDGET = {"low": 1024, "medium": 5000, "high": 16000, "max": 24576}
+
+
 def _build_gemini_settings(
     mcp_env: dict[str, str],
     max_turns: int | None = None,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     """Build the .gemini/settings.json content.
 
-    Disables all built-in tools via ``tools.coreTools: []`` so the agent
-    can only interact with the environment through MCP tools.
+    Excludes built-in tools by name. MCP tools are prefixed with ``mcp_``
+    (via OPENREWARD_TOOL_PREFIX) so they don't collide with the excluded names.
     """
     settings: dict[str, Any] = {
         "mcpServers": {
@@ -173,12 +202,12 @@ def _build_gemini_settings(
                 "env": mcp_env,
             }
         },
-        "tools": {
-            "coreTools": [],
-        },
+        # No tools.exclude — MCP tools with mcp_ prefix don't collide.
     }
     if max_turns:
         settings["max_turns"] = min(max_turns, 100)
+    if effort:
+        settings["thinkingBudget"] = _EFFORT_TO_THINKING_BUDGET.get(effort, 16000)
     return settings
 
 
@@ -228,6 +257,20 @@ class GeminiAgent(BaseAgent):
                 mcp_env["OPENREWARD_TOOLSET_NAME"] = ctx.toolset_name
             else:
                 mcp_env["OPENREWARD_TOOL_DESCRIPTIONS"] = "env"
+            # Pre-build tool specs so the MCP bridge can respond to list_tools
+            # instantly (avoids Gemini CLI's MCP timeout during tool discovery).
+            prebuilt = []
+            excluded_lower = {n.lower() for n in _compute_gemini_excluded_tools(
+                env_tool_names, ctx.use_all_filesystem_tools)}
+            for t in ctx.tools:
+                if t.name.lower() not in excluded_lower:
+                    prebuilt.append({
+                        "name": t.name,
+                        "description": t.description or "",
+                        "inputSchema": dict(t.input_schema) if t.input_schema else {"type": "object", "properties": {}},
+                    })
+            mcp_env["OPENREWARD_PREBUILT_TOOLS"] = json.dumps(prebuilt)
+
             if os.environ.get("OPENREWARD_URL"):
                 mcp_env["OPENREWARD_URL"] = os.environ["OPENREWARD_URL"]
             if ctx.secrets:
@@ -236,7 +279,7 @@ class GeminiAgent(BaseAgent):
             # Rewards sidecar JSONL
             if log_dir:
                 rewards_path = log_dir / f"trial_{trial_id}_rewards.jsonl"
-                mcp_env["OPENREWARD_REWARDS_FILE"] = str(rewards_path)
+                mcp_env["OPENREWARD_REWARDS_FILE"] = str(rewards_path.resolve())
 
             # Compute which env tools to exclude from MCP
             exclude_tools = _compute_gemini_excluded_tools(
@@ -256,9 +299,11 @@ class GeminiAgent(BaseAgent):
             gemini_config_dir = tmppath / ".gemini"
             gemini_config_dir.mkdir()
 
-            settings = _build_gemini_settings(mcp_env, ctx.max_turns)
+            settings = _build_gemini_settings(mcp_env, ctx.max_turns, ctx.effort)
 
-            (gemini_config_dir / "settings.json").write_text(json.dumps(settings))
+            settings_json = json.dumps(settings)
+            (gemini_config_dir / "settings.json").write_text(settings_json)
+            print(f"[gemini] Settings: {len(settings_json)} bytes, env keys: {list(mcp_env.keys())}", file=sys.stderr)
 
             # Build system prompt + MCP tools section
             mcp_section = _build_gemini_mcp_prompt(env_tool_names, exclude_tools)

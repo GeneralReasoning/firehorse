@@ -43,12 +43,16 @@ class OpenRewardBridge:
         self._rewards_file: Any = None  # file handle for rewards sidecar
 
         self._toolset_name: str | None = None
+        self._tool_prefix: str = os.environ.get("OPENREWARD_TOOL_PREFIX", "")
+        self._prebuilt_tools: list[Tool] | None = self._load_prebuilt_tools()
         self._toolcalls_file: Any = None  # file handle for tool-call log
         self.tools: list[ToolSpec] = []
         self.finished = False
         self.last_reward: float | None = None
         self.total_reward: float = 0.0
         self.call_count: int = 0
+
+        self._initialized = False
 
         self.server.list_tools()(self._list_tools)
         self.server.call_tool(validate_input=False)(self._call_tool)
@@ -135,10 +139,82 @@ class OpenRewardBridge:
 
         print(f"[openreward-bridge] Session created, {len(self.tools)} tools available", file=sys.stderr)
 
+    def _load_prebuilt_tools(self) -> list[Tool] | None:
+        """Load pre-built tool specs from env var for instant list_tools response.
+
+        When OPENREWARD_PREBUILT_TOOLS is set (JSON array of {name, description, inputSchema}),
+        list_tools returns these immediately without waiting for OpenReward init.
+        This is critical for the Gemini CLI which times out if tool listing is slow.
+        """
+        raw = os.environ.get("OPENREWARD_PREBUILT_TOOLS")
+        if not raw:
+            return None
+        try:
+            specs = json.loads(raw)
+            prefix = self._tool_prefix
+            tools = []
+            for s in specs:
+                name = f"{prefix}{s['name']}" if prefix else s["name"]
+                tools.append(Tool(
+                    name=name,
+                    description=s.get("description", ""),
+                    inputSchema=s.get("inputSchema", {"type": "object", "properties": {}}),
+                ))
+            print(f"[openreward-bridge] Pre-built {len(tools)} tools for instant listing", file=sys.stderr)
+            return tools
+        except (json.JSONDecodeError, KeyError) as e:
+            print(f"[openreward-bridge] Failed to load prebuilt tools: {e}", file=sys.stderr)
+            return None
+
+    async def _background_init(self) -> None:
+        """Initialize OpenReward in background, parallel with MCP handshake."""
+        try:
+            print("[openreward-bridge] Starting OpenReward init...", file=sys.stderr)
+            await self.initialize()
+            self._initialized = True
+            print(f"[openreward-bridge] Ready, {len(self.tools)} tools", file=sys.stderr)
+        except Exception as e:
+            import traceback
+            err_msg = f"Init failed: {e}\n{traceback.format_exc()}"
+            print(f"[openreward-bridge] {err_msg}", file=sys.stderr)
+            # Also write to a debug file since Gemini CLI may not forward stderr
+            try:
+                with open("/tmp/firehorse_mcp_debug.log", "w") as f:
+                    f.write(err_msg)
+            except Exception:
+                pass
+            self._init_error = e
+
+    async def _ensure_initialized(self) -> None:
+        """Wait for background initialization to complete."""
+        if not self._initialized and hasattr(self, '_init_task'):
+            await self._init_task
+            if hasattr(self, '_init_error'):
+                raise RuntimeError(f"OpenReward init failed: {self._init_error}")
+
+    def _prefixed_tool(self, spec: ToolSpec, description_override: str | None = None) -> Tool:
+        """Convert a ToolSpec to MCP Tool, optionally prefixing the name."""
+        tool = toolspec_to_mcp(spec, description_override=description_override)
+        if self._tool_prefix:
+            tool = Tool(
+                name=f"{self._tool_prefix}{tool.name}",
+                description=tool.description,
+                inputSchema=tool.inputSchema,
+            )
+        return tool
+
     async def _list_tools(self) -> list[Tool]:
+        # If pre-built tool specs are available (passed via env var), return
+        # them immediately without waiting for OpenReward init. This avoids
+        # blocking the Gemini CLI's MCP tool discovery.
+        if self._prebuilt_tools is not None:
+            return self._prebuilt_tools
+
+        await self._ensure_initialized()
+
         if self._toolset_name is not None:
             # Session toolset provides correct descriptions; no manual overrides needed
-            return [toolspec_to_mcp(t) for t in self.tools]
+            return [self._prefixed_tool(t) for t in self.tools]
 
         # Legacy path: manual description overrides when no toolset is used
         variant = os.environ.get("OPENREWARD_TOOL_DESCRIPTIONS", "claude")
@@ -148,13 +224,19 @@ class OpenRewardBridge:
             descs = CODEX_DESCRIPTIONS
         else:
             # "env" or any other value: use environment's original descriptions
-            return [toolspec_to_mcp(t) for t in self.tools]
+            return [self._prefixed_tool(t) for t in self.tools]
         return [
-            toolspec_to_mcp(t, description_override=descs.get(t.name.lower()))
+            self._prefixed_tool(t, description_override=descs.get(t.name.lower()))
             for t in self.tools
         ]
 
     async def _call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        await self._ensure_initialized()
+
+        # Strip the prefix if one was applied during list_tools
+        if self._tool_prefix and name.startswith(self._tool_prefix):
+            name = name[len(self._tool_prefix):]
+
         if self.finished:
             return CallToolResult(
                 content=[TextContent(type="text", text="Episode already complete. No more tool calls allowed.")],
@@ -170,11 +252,22 @@ class OpenRewardBridge:
         try:
             output = await self._session.call_tool(name, arguments)
         except ToolCallError as e:
+            try:
+                with open("/tmp/firehorse_mcp_debug.log", "a") as f:
+                    f.write(f"ToolCallError({name}): {e}\n")
+            except Exception:
+                pass
             return CallToolResult(
                 content=[TextContent(type="text", text=f"Tool error: {e}")],
                 isError=True,
             )
         except Exception as e:
+            try:
+                import traceback
+                with open("/tmp/firehorse_mcp_debug.log", "a") as f:
+                    f.write(f"Exception({name}): {e}\n{traceback.format_exc()}\n")
+            except Exception:
+                pass
             return CallToolResult(
                 content=[TextContent(type="text", text=f"Unexpected error: {e}")],
                 isError=True,
@@ -262,7 +355,9 @@ class OpenRewardBridge:
             self._session_entered = False
 
     async def run(self):
-        await self.initialize()
+        # Start OpenReward init in background — the Gemini CLI has a 5s MCP
+        # timeout, so we must respond to the handshake immediately.
+        self._init_task = asyncio.create_task(self._background_init())
         try:
             async with stdio_server() as (read_stream, write_stream):
                 await self.server.run(

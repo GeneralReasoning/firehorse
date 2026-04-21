@@ -67,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Agent evaluation harness for OpenReward environments",
     )
     parser.add_argument("--env", required=True, help="Environment name (e.g. GeneralReasoning/portfolio)")
-    parser.add_argument("--agent", default="claude-code", help="Agent type (default: claude-code)")
+    parser.add_argument("--agent", default="resum", help="Agent type (default: resum)")
     parser.add_argument("--model", required=True, help="Model identifier (e.g. anthropic/claude-opus-4-6)")
     parser.add_argument("--variant", default=None, help="Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH)")
     parser.add_argument("--n-concurrent", type=int, default=1, help="Max parallel trials (default: 1)")
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", default=None, help="Name for this run")
     parser.add_argument("--max-turns", type=int, default=None, help="Max tool call turns per trial")
     parser.add_argument(
-        "--effort", default=None, choices=["none", "low", "medium", "high", "max"],
+        "--effort", default=None, choices=["none", "low", "medium", "high", "max", "xhigh"],
         help="Reasoning/thinking effort passed to the model (default: none — use model's own default)",
     )
     parser.add_argument(

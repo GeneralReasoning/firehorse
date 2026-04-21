@@ -166,6 +166,8 @@ class _FakeRollout:
 
 
 class TestLogCodexEventToRollout:
+    # --- Legacy v0.39 (nested msg) format ---
+
     def test_agent_message_logged(self):
         rollout = _FakeRollout()
         event = {"msg": {"type": "agent_message", "message": "Hello"}}
@@ -229,3 +231,108 @@ class TestLogCodexEventToRollout:
         _log_codex_event_to_rollout(event, rollout)
         assert len(rollout.logged) == 1
         assert rollout.logged[0][0].name == "shell"
+
+    # --- Current CLI: item-based format ---
+
+    def test_item_completed_agent_message(self):
+        """item.completed with agent_message logs AssistantMessage."""
+        rollout = _FakeRollout()
+        event = {
+            "type": "item.completed",
+            "item": {"id": "item_0", "type": "agent_message", "text": "Working on it"},
+        }
+        _log_codex_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 1
+        assert rollout.logged[0][0].content == "Working on it"
+
+    def test_item_started_mcp_tool_call(self):
+        """item.started with mcp_tool_call logs ToolCall."""
+        rollout = _FakeRollout()
+        event = {
+            "type": "item.started",
+            "item": {
+                "id": "item_1",
+                "type": "mcp_tool_call",
+                "server": "openreward",
+                "tool": "bash",
+                "arguments": {"command": "ls"},
+                "result": None,
+                "status": "in_progress",
+            },
+        }
+        _log_codex_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 1
+        tc = rollout.logged[0][0]
+        assert tc.name == "bash"
+        assert tc.call_id == "item_1"
+        assert json.loads(tc.content) == {"command": "ls"}
+
+    def test_item_completed_mcp_tool_call_with_result(self):
+        """item.completed with mcp_tool_call and result logs ToolResult."""
+        rollout = _FakeRollout()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_1",
+                "type": "mcp_tool_call",
+                "server": "openreward",
+                "tool": "bash",
+                "arguments": {"command": "ls"},
+                "result": {
+                    "content": [{"type": "text", "text": "file.txt\n"}],
+                    "structured_content": None,
+                },
+                "status": "completed",
+            },
+        }
+        _log_codex_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 1
+        tr, kwargs = rollout.logged[0]
+        assert tr.content == "file.txt\n"
+        assert tr.call_id == "item_1"
+        assert kwargs["reward"] is None
+        assert kwargs["is_finished"] is False
+
+    def test_item_completed_mcp_tool_call_extracts_reward(self):
+        """item.completed mcp_tool_call with OR_REWARD tag extracts reward."""
+        rollout = _FakeRollout()
+        event = {
+            "type": "item.completed",
+            "item": {
+                "id": "item_5",
+                "type": "mcp_tool_call",
+                "tool": "answer",
+                "arguments": {"answer": "42"},
+                "result": {
+                    "content": [
+                        {"type": "text", "text": "Task complete"},
+                        {"type": "text", "text": ""},
+                        {"type": "text", "text": '\n\n[EPISODE COMPLETE] [OR_REWARD:{"r":1.0,"f":true}]'},
+                    ],
+                },
+                "status": "completed",
+            },
+        }
+        _log_codex_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 1
+        tr, kwargs = rollout.logged[0]
+        assert kwargs["reward"] == 1.0
+        assert kwargs["is_finished"] is True
+        assert "OR_REWARD" not in tr.content
+
+    def test_turn_completed_ignored(self):
+        """turn.completed events should not log anything to rollout."""
+        rollout = _FakeRollout()
+        event = {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 1000, "output_tokens": 200},
+        }
+        _log_codex_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 0
+
+    def test_thread_started_ignored(self):
+        """thread.started events should not log anything to rollout."""
+        rollout = _FakeRollout()
+        event = {"type": "thread.started", "thread_id": "abc-123"}
+        _log_codex_event_to_rollout(event, rollout)
+        assert len(rollout.logged) == 0

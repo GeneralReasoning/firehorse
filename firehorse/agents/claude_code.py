@@ -206,8 +206,17 @@ def _sanitize_prompt(text: str) -> str:
     return text
 
 
-def _log_event_to_rollout(event: dict, rollout: Any) -> None:
-    """Parse a Claude stream-json event and log it to an OpenReward rollout."""
+def _log_event_to_rollout(
+    event: dict,
+    rollout: Any,
+    seen_reasoning: set[str] | None = None,
+) -> None:
+    """Parse a Claude stream-json event and log it to an OpenReward rollout.
+
+    *seen_reasoning* is an optional set shared across calls to deduplicate
+    reasoning content that arrives in separate stream events (e.g. Kimi K2.5
+    sends both ``thinking`` and ``redacted_thinking`` blocks with the same text).
+    """
     event_type = event.get("type")
     msg = event.get("message", {})
     if not isinstance(msg, dict):
@@ -216,6 +225,9 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
     content_blocks = msg.get("content", [])
     if not isinstance(content_blocks, list):
         return
+
+    if seen_reasoning is None:
+        seen_reasoning = set()
 
     for block in content_blocks:
         if not isinstance(block, dict):
@@ -230,7 +242,8 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
             elif btype == "thinking":
                 thinking = block.get("thinking", "")
                 summary = block.get("summary", "")
-                if thinking:
+                if thinking and thinking not in seen_reasoning:
+                    seen_reasoning.add(thinking)
                     rollout.log(ReasoningItem(content=thinking, summary=summary))
             elif btype == "redacted_thinking":
                 # OpenRouter encodes reasoning as base64 (openrouter.reasoning:<b64>).
@@ -247,7 +260,8 @@ def _log_event_to_rollout(event: dict, rollout: Any) -> None:
                             f"[claude_code] Failed to decode openrouter.reasoning payload: {e}",
                             file=sys.stderr,
                         )
-                if content:
+                if content and content not in seen_reasoning:
+                    seen_reasoning.add(content)
                     rollout.log(ReasoningItem(content=content))
             elif btype == "tool_use":
                 rollout.log(ToolCall(
@@ -390,9 +404,8 @@ class ClaudeCodeAgent(BaseAgent):
                 "--no-session-persistence",
             ]
 
-            # Only add --effort for Anthropic models (extended thinking is Anthropic-specific).
             # Omitted when ctx.effort is None so the Claude CLI uses its own default.
-            if is_anthropic and ctx.effort:
+            if ctx.effort:
                 cmd.extend(["--effort", ctx.effort])
 
             if all_disallow:
@@ -511,6 +524,7 @@ class ClaudeCodeAgent(BaseAgent):
 
             async def read_stdout():
                 nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count
+                seen_reasoning: set[str] = set()  # shared across events to dedup thinking blocks
                 assert proc.stdout is not None
                 async for line in proc.stdout:
                     line_str = line.decode(errors="replace").strip()
@@ -532,7 +546,7 @@ class ClaudeCodeAgent(BaseAgent):
                     # Log to OpenReward rollout
                     rollout = _get_rollout(event)
                     if rollout:
-                        _log_event_to_rollout(event, rollout)
+                        _log_event_to_rollout(event, rollout, seen_reasoning=seen_reasoning)
 
                     # Detect MCP server failure from system.init event
                     if event.get("type") == "system" and event.get("subtype") == "init":
