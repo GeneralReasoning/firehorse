@@ -6,10 +6,16 @@ import collections
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+# asyncio.create_subprocess_exec on Windows uses CreateProcess directly and
+# does not honor PATHEXT, so a bare "claude" fails when only claude.cmd is on
+# PATH (the typical npm-global install). Resolve once via shutil.which.
+_CLAUDE_BIN = shutil.which("claude") or "claude"
 
 from openreward import (
     AssistantMessage,
@@ -309,7 +315,7 @@ class ClaudeCodeAgent(BaseAgent):
 
     async def setup(self) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "claude", "--version",
+            _CLAUDE_BIN, "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -394,7 +400,7 @@ class ClaudeCodeAgent(BaseAgent):
 
             # Build command
             cmd = [
-                "claude",
+                _CLAUDE_BIN,
                 "--print",
                 "--verbose",
                 "--output-format", "stream-json",

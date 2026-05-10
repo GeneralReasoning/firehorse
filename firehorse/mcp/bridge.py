@@ -56,6 +56,24 @@ class OpenRewardBridge:
 
         self.server.list_tools()(self._list_tools)
         self.server.call_tool(validate_input=False)(self._call_tool)
+        # Codex CLI probes resources/list, resources/templates/list, and
+        # prompts/list during MCP startup. We don't expose any of those, but
+        # without explicit handlers the requests time out (30s), and the
+        # error messages leak into the agent's own captured output where the
+        # model sees them and wastes tokens trying to debug. Register empty
+        # handlers so the probes return immediately.
+        self.server.list_resources()(self._list_resources_empty)
+        self.server.list_resource_templates()(self._list_resource_templates_empty)
+        self.server.list_prompts()(self._list_prompts_empty)
+
+    async def _list_resources_empty(self) -> list:
+        return []
+
+    async def _list_resource_templates_empty(self) -> list:
+        return []
+
+    async def _list_prompts_empty(self) -> list:
+        return []
 
     async def initialize(self):
         env_name = os.environ["OPENREWARD_ENV_NAME"]

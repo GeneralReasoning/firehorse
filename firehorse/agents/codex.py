@@ -4,11 +4,17 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
+
+# asyncio.create_subprocess_exec on Windows uses CreateProcess directly and
+# does not honor PATHEXT, so a bare "codex" fails when only codex.cmd is on
+# PATH (the typical npm-global install). Resolve once via shutil.which.
+_CODEX_BIN = shutil.which("codex") or "codex"
 
 from openreward import (
     AssistantMessage,
@@ -360,7 +366,7 @@ class CodexAgent(BaseAgent):
 
     async def setup(self) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "codex", "--version",
+            _CODEX_BIN, "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -403,9 +409,11 @@ class CodexAgent(BaseAgent):
             if ctx.secrets:
                 mcp_env["OPENREWARD_SESSION_SECRETS"] = json.dumps(ctx.secrets)
 
-            # Rewards sidecar JSONL
+            # Rewards sidecar JSONL — must be absolute since the MCP server
+            # runs with a different CWD (codex sets `-C tmppath`).
             if log_dir:
-                rewards_path = log_dir / f"trial_{trial_id}_rewards.jsonl"
+                rewards_path = (log_dir / f"trial_{trial_id}_rewards.jsonl").resolve()
+                rewards_path.parent.mkdir(parents=True, exist_ok=True)
                 mcp_env["OPENREWARD_REWARDS_FILE"] = str(rewards_path)
 
             # Compute which env tools to exclude from MCP.
@@ -435,7 +443,7 @@ class CodexAgent(BaseAgent):
             # Without this, Codex cancels every MCP tool call in exec mode
             # since there's no interactive UI to approve them.
             cmd = [
-                "codex", "exec",
+                _CODEX_BIN, "exec",
                 "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
@@ -449,9 +457,12 @@ class CodexAgent(BaseAgent):
             for key, value in mcp_env.items():
                 cmd.extend(["-c", f"mcp_servers.openreward.env.{key}={json.dumps(value)}"])
 
-            # Pass reasoning effort via config override
+            # Pass reasoning effort via config override.
+            # Codex 0.129+ renamed the top level from "max" to "xhigh"; firehorse
+            # still accepts "max" as the canonical name, so translate here.
             if ctx.effort:
-                cmd.extend(["-c", f"model_reasoning_effort={json.dumps(ctx.effort)}"])
+                effort = "xhigh" if ctx.effort == "max" else ctx.effort
+                cmd.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
 
 
             # Configure a non-default model_provider when needed (OpenRouter
@@ -474,7 +485,11 @@ class CodexAgent(BaseAgent):
                     "-c", "features.tool_suggest=false",
                 ])
 
-            cmd.append(full_prompt)
+            # Pass the prompt via stdin (codex reads it when the positional arg
+            # is "-"). Avoids Windows' ~32KB CreateProcess command-line limit,
+            # which truncates large prompts mid-text and leaves the agent with
+            # only part of the system prompt.
+            cmd.append("-")
 
             proc_env = {**os.environ}
 
@@ -482,11 +497,18 @@ class CodexAgent(BaseAgent):
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
                 limit=1024 * 1024,  # 1MB line limit for large stderr output
             )
+
+            # Write prompt to stdin and close so codex sees EOF.
+            assert proc.stdin is not None
+            proc.stdin.write(full_prompt.encode("utf-8"))
+            await proc.stdin.drain()
+            proc.stdin.close()
 
             # --- JSONL logging ---
             main_log = None
