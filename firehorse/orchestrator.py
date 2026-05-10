@@ -178,6 +178,7 @@ async def run_evaluation(config: RunConfig) -> RunSummary:
                 use_builtin_descriptions=config.use_builtin_descriptions,
                 use_all_filesystem_tools=config.use_all_filesystem_tools,
                 plan_mode=config.plan_mode,
+                toolset=config.toolset,
             )
             result = await run_trial(
                 env, task, agent, trial_config,
