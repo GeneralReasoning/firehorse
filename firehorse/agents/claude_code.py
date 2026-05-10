@@ -431,18 +431,38 @@ class ClaudeCodeAgent(BaseAgent):
             if submission_reminder:
                 full_prompt = f"{full_prompt}\n\n{submission_reminder}"
             full_prompt = _sanitize_prompt(full_prompt)
-            cmd.extend(["-p", full_prompt])
+            # Pipe the prompt via stdin instead of `-p <prompt>`. Claude
+            # Code 2.1.x no longer accepts -p as a prompt-argument flag
+            # in --print mode (it's now a synonym for --print itself);
+            # passing `-p <text>` gets parsed as setting --print=<text>
+            # and the CLI then errors out with:
+            #   "Input must be provided either through stdin or as a
+            #    prompt argument when using --print"
+            # stdin works on every Claude Code version we've seen.
             proc_env = {**os.environ, **extra_env}
 
             print(f"[claude-code] Launching with model={model_name}", file=sys.stderr)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
                 limit=_SUBPROCESS_LINE_LIMIT,
             )
+            # Send the prompt over stdin and close it so the CLI gets
+            # EOF and starts processing. Best-effort — the CLI surfaces
+            # any input issue via stderr / non-zero exit.
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.write(full_prompt.encode("utf-8"))
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                # CLI exited before we finished writing — its stderr
+                # already captures the failure cause.
+                pass
 
             # --- Set up JSONL logging ---
             main_log = None
