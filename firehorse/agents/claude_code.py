@@ -583,18 +583,32 @@ class ClaudeCodeAgent(BaseAgent):
                     if rollout:
                         _log_event_to_rollout(event, rollout, seen_reasoning=seen_reasoning)
 
-                    # Detect MCP server failure from system.init event
+                    # Detect MCP server failure from system.init event.
+                    # Note: Claude Code 2.1.138 emits system.init before MCP
+                    # stdio servers finish booting, so "pending" at this point
+                    # is a normal transient state — wait for tool_result
+                    # errors to confirm. Only definitively-bad statuses count.
                     if event.get("type") == "system" and event.get("subtype") == "init":
+                        _BAD_MCP_STATUSES = {"failed", "error", "needs-auth", "disconnected"}
                         for srv in event.get("mcp_servers", []):
-                            if srv.get("name") == "openreward" and srv.get("status") != "connected":
-                                mcp_failed = True
-                                extra = {k: v for k, v in srv.items() if k not in ("name", "status")}
-                                detail = f" details={extra}" if extra else ""
-                                print(
-                                    f"[claude-code][{trial_id}] MCP 'openreward' status="
-                                    f"{srv.get('status')!r}{detail} — will abort after first futile calls",
-                                    file=sys.stderr,
-                                )
+                            if srv.get("name") == "openreward":
+                                status = srv.get("status")
+                                if status in _BAD_MCP_STATUSES:
+                                    mcp_failed = True
+                                    extra = {k: v for k, v in srv.items() if k not in ("name", "status")}
+                                    detail = f" details={extra}" if extra else ""
+                                    print(
+                                        f"[claude-code][{trial_id}] MCP 'openreward' status="
+                                        f"{status!r}{detail} — will abort after first futile calls",
+                                        file=sys.stderr,
+                                    )
+                                elif status != "connected":
+                                    # "pending" / unknown — log but don't abort yet.
+                                    print(
+                                        f"[claude-code][{trial_id}] MCP 'openreward' status={status!r} "
+                                        f"(still starting); will confirm via tool calls",
+                                        file=sys.stderr,
+                                    )
 
                     # Track the result event (has cost/token data)
                     if event.get("type") == "result":
@@ -611,23 +625,6 @@ class ClaudeCodeAgent(BaseAgent):
                                 tool_use_id = block.get("id", "")
                                 if tool_name.startswith("mcp__openreward__"):
                                     mcp_tool_use_ids[tool_use_id] = tool_name
-                                # Abort if MCP failed and agent is making futile calls
-                                if mcp_failed:
-                                    mcp_failed_tool_calls += 1
-                                    if mcp_failed_tool_calls >= 2:
-                                        tail = "\n    ".join(list(bridge_stderr)[-5:]) or \
-                                            "(no [openreward-bridge] output captured)"
-                                        print(
-                                            f"[claude-code][{trial_id}] MCP failed, agent making futile "
-                                            f"calls — terminating\n"
-                                            f"  last bridge output:\n    {tail}\n"
-                                            f"  common causes: missing/invalid OPENREWARD_API_KEY, "
-                                            f"backend rejecting env/task, or high concurrency "
-                                            f"overloading the backend",
-                                            file=sys.stderr,
-                                        )
-                                        proc.kill()
-                                        return
 
                     # Annotate MCP tool results with call_count for reward file correlation.
                     # Only count successful calls (is_error=False) since the bridge only
@@ -652,6 +649,30 @@ class ClaudeCodeAgent(BaseAgent):
                                         "is_error": is_error,
                                     }
                                     log_file.write(json.dumps(annotation) + "\n")
+                                    # Count *actual* MCP failures, not just any
+                                    # tool call. Abort only after we've seen
+                                    # two real error responses — by then the
+                                    # MCP server has had plenty of time to come
+                                    # up and is genuinely not working.
+                                    if is_error:
+                                        mcp_failed_tool_calls += 1
+                                        if mcp_failed_tool_calls >= 2:
+                                            tail = "\n    ".join(list(bridge_stderr)[-5:]) or \
+                                                "(no [openreward-bridge] output captured)"
+                                            print(
+                                                f"[claude-code][{trial_id}] MCP returning errors on "
+                                                f"{mcp_failed_tool_calls} consecutive calls — terminating\n"
+                                                f"  last bridge output:\n    {tail}\n"
+                                                f"  common causes: missing/invalid OPENREWARD_API_KEY, "
+                                                f"backend rejecting env/task, or high concurrency "
+                                                f"overloading the backend",
+                                                file=sys.stderr,
+                                            )
+                                            proc.kill()
+                                            return
+                                    else:
+                                        # Reset the streak on any successful call.
+                                        mcp_failed_tool_calls = 0
 
             async def read_stderr():
                 assert proc.stderr is not None
