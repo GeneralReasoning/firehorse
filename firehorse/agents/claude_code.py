@@ -440,6 +440,14 @@ class ClaudeCodeAgent(BaseAgent):
             #    prompt argument when using --print"
             # stdin works on every Claude Code version we've seen.
             proc_env = {**os.environ, **extra_env}
+            # Claude Code's default MCP startup timeout (30 s) is tight for
+            # Python-based MCP servers on Windows: the interpreter cold-start
+            # plus aiohttp/openreward imports alone takes ~4-8 s, and the
+            # openreward `initialize` adds further latency. Without this
+            # bump, `firehorse.mcp` lands in status='pending' and the trial
+            # aborts with "MCP failed, agent making futile calls". Honor an
+            # operator override but default high enough for Windows.
+            proc_env.setdefault("MCP_TIMEOUT", "120000")
 
             print(f"[claude-code] Launching with model={model_name}", file=sys.stderr)
 
