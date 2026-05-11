@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -556,6 +557,13 @@ class ClaudeCodeAgent(BaseAgent):
             mcp_tool_use_ids: dict[str, str] = {}  # tool_use_id -> mcp tool name
             mcp_result_count = 0
             bridge_stderr: collections.deque[str] = collections.deque(maxlen=20)
+            # For periodic progress reporting — Claude Code rollouts on
+            # large envs can run silently for many minutes, which looks
+            # indistinguishable from a hung process. We print a one-liner
+            # every Nth assistant tool call with the elapsed wall-clock
+            # time and current tool name.
+            run_started = time.monotonic()
+            PROGRESS_EVERY_N_TOOLS = 1  # print on every tool call
 
             async def read_stdout():
                 nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count
@@ -625,6 +633,19 @@ class ClaudeCodeAgent(BaseAgent):
                                 tool_use_id = block.get("id", "")
                                 if tool_name.startswith("mcp__openreward__"):
                                     mcp_tool_use_ids[tool_use_id] = tool_name
+                                # Heartbeat — print a short status line so the
+                                # operator can see the trial is making
+                                # progress. Strips the long mcp__openreward__
+                                # prefix for readability.
+                                if turns_used % PROGRESS_EVERY_N_TOOLS == 0:
+                                    elapsed = time.monotonic() - run_started
+                                    short = tool_name.replace("mcp__openreward__", "")
+                                    print(
+                                        f"[claude-code][{trial_id}] turn {turns_used} "
+                                        f"({elapsed:5.0f}s) → {short}",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
 
                     # Annotate MCP tool results with call_count for reward file correlation.
                     # Only count successful calls (is_error=False) since the bridge only
