@@ -101,6 +101,23 @@ def _jsonl_write(log_file: IO | None, event: dict) -> None:
         log_file.write(json.dumps(event, default=str) + "\n")
 
 
+def _react_heartbeat(
+    provider: str,
+    trial_id: Any,
+    turns_used: int,
+    trial_start: float,
+    tool_name: str,
+) -> None:
+    elapsed = time.monotonic() - trial_start
+    short = (tool_name or "?").replace("mcp__openreward__", "")
+    print(
+        f"[react/{provider}][{trial_id}] turn {turns_used} "
+        f"({elapsed:5.0f}s) → {short}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _format_openrouter_tool(tool: Any) -> dict:
     # Worked around here because openreward's built-in format="openrouter"
     # nests `parameters` outside `function`, which Chat Completions silently
@@ -274,6 +291,7 @@ class ReactAgent(BaseAgent):
         tools = await ctx.session.list_tools(format="anthropic")
         messages: list[dict] = [{"role": "user", "content": ctx.prompt_text}]
 
+        trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         turns_used = 0
         finished = False
         last_reward: float | None = None
@@ -347,6 +365,7 @@ class ReactAgent(BaseAgent):
                 if block.type != "tool_use":
                     continue
                 turns_used += 1
+                _react_heartbeat("anthropic", trial_id, turns_used, trial_start, block.name)
                 try:
                     tr = await ctx.session.call_tool(block.name, block.input)
                     content = _format_tool_output_anthropic(tr)
@@ -428,6 +447,7 @@ class ReactAgent(BaseAgent):
         tools = await ctx.session.list_tools(format="openai")
         input_list: list[Any] = [{"role": "user", "content": ctx.prompt_text}]
 
+        trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         turns_used = 0
         finished = False
         last_reward: float | None = None
@@ -494,6 +514,7 @@ class ReactAgent(BaseAgent):
                     continue
                 has_tool_call = True
                 turns_used += 1
+                _react_heartbeat("openai", trial_id, turns_used, trial_start, item.name)
                 try:
                     tr = await ctx.session.call_tool(
                         item.name, json.loads(str(item.arguments))
@@ -591,6 +612,7 @@ class ReactAgent(BaseAgent):
             types.Content(role="user", parts=[types.Part(text=ctx.prompt_text)])
         ]
 
+        trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         turns_used = 0
         finished = False
         last_reward: float | None = None
@@ -625,6 +647,7 @@ class ReactAgent(BaseAgent):
                     continue
                 turns_used += 1
                 fc = part.function_call
+                _react_heartbeat("google", trial_id, turns_used, trial_start, fc.name)
                 try:
                     tr = await ctx.session.call_tool(
                         fc.name,
@@ -717,6 +740,7 @@ class ReactAgent(BaseAgent):
             {"role": "user", "content": ctx.prompt_text},
         ]
 
+        trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         turns_used = 0
         finished = False
         last_reward: float | None = None
@@ -792,6 +816,7 @@ class ReactAgent(BaseAgent):
 
             for tc in msg.tool_calls:
                 turns_used += 1
+                _react_heartbeat("openrouter", trial_id, turns_used, trial_start, tc.function.name)
                 raw_args = tc.function.arguments
                 try:
                     args = json.loads(raw_args) if raw_args else {}

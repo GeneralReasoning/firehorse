@@ -385,6 +385,17 @@ class GeminiAgent(BaseAgent):
             result_stats: dict | None = None
             mcp_failed = False
             accumulated_text: list[str] = []
+            run_started = time.monotonic()
+
+            def _heartbeat(tool_name: str) -> None:
+                elapsed = time.monotonic() - run_started
+                short = tool_name.replace("mcp__openreward__", "") or "?"
+                print(
+                    f"[gemini][{trial_id}] turn {turns_used} ({elapsed:5.0f}s) "
+                    f"→ {short}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             async def read_stdout():
                 nonlocal turns_used, result_stats, mcp_failed
@@ -412,6 +423,7 @@ class GeminiAgent(BaseAgent):
                     # Track tool calls as turns
                     if event.get("type") == "tool_use":
                         turns_used += 1
+                        _heartbeat(event.get("tool_name", ""))
 
                     # Capture result stats
                     if event.get("type") == "result":
