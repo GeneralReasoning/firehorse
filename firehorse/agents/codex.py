@@ -408,6 +408,22 @@ class CodexAgent(BaseAgent):
                 mcp_env["OPENREWARD_URL"] = os.environ["OPENREWARD_URL"]
             if ctx.secrets:
                 mcp_env["OPENREWARD_SESSION_SECRETS"] = json.dumps(ctx.secrets)
+            # Forward replay / resume signals to the MCP bridge subprocess.
+            # `firehorse resume` sets these on the firehorse process so the
+            # bridge (which runs in a fresh subprocess started by codex)
+            # needs them explicitly injected via codex's
+            # `-c mcp_servers.openreward.env.<KEY>=<VALUE>` config flags.
+            # Without this forwarding the bridge never sees the manifest
+            # path and silently skips replay — the agent then sees a
+            # blank GW1 env instead of the rebuilt state.
+            for _k in (
+                "OPENREWARD_REPLAY_PATH",
+                "OPENREWARD_REPLAY_ONLY",
+                "OPENREWARD_REPLAY_PROGRESS_FILE",
+            ):
+                _v = os.environ.get(_k)
+                if _v:
+                    mcp_env[_k] = _v
 
             # Rewards sidecar JSONL — must be absolute since the MCP server
             # runs with a different CWD (codex sets `-C tmppath`).
@@ -476,6 +492,22 @@ class CodexAgent(BaseAgent):
                 "--model", model_name,
                 "-C", str(tmppath),
             ]
+            # NOTE: we used to support `codex exec resume <thread_id>` here,
+            # but codex resume does NOT re-bind MCP servers from -c
+            # config flags. The agent's resumed conversation remembers
+            # `mcp__openreward__*` tool names but the new codex process
+            # has no MCP server registered to dispatch them, so every
+            # tool call returns "unsupported call".
+            #
+            # `firehorse resume <dir>` now skips codex resume entirely.
+            # It just relies on OPENREWARD_REPLAY_PATH (handled in the
+            # MCP bridge) to fast-replay every prior tool call against
+            # a fresh OR session so the env reaches the same state. The
+            # agent starts fresh with full MCP tools — it has no memory
+            # of the prior model reasoning, but `view_current_squad` /
+            # the env's own state-inspection tools give it everything
+            # it needs to continue.
+            _resume_thread = None  # no longer used; kept for code below
 
             # MCP server config via dotted-path -c flags
             cmd.extend(["-c", f"mcp_servers.openreward.command={json.dumps(sys.executable)}"])
@@ -498,6 +530,20 @@ class CodexAgent(BaseAgent):
             # covers individual tool calls (e.g. FPL's `next_gameweek`).
             startup_to = int(os.environ.get("OPENREWARD_MCP_STARTUP_SEC", "300"))
             tool_to = int(os.environ.get("OPENREWARD_MCP_TOOL_SEC", "600"))
+            # Replay mode: the bridge's initialize() will fast-replay
+            # every prior tool call before tools/list answers, which on
+            # long rollouts can take 1-5 minutes on top of the normal
+            # cold-start. Bump startup_timeout to 1200s ONLY when
+            # OPENREWARD_REPLAY_PATH is set so non-resume runs keep the
+            # tighter 300s ceiling (which surfaces real env-pod bugs
+            # faster). Operator env-var override always wins.
+            if os.environ.get("OPENREWARD_REPLAY_PATH") and startup_to < 1200:
+                startup_to = 1200
+                print(
+                    f"[codex] replay mode detected — bumping "
+                    f"mcp_servers.openreward.startup_timeout_sec={startup_to}",
+                    file=sys.stderr,
+                )
             cmd.extend(["-c", f"mcp_servers.openreward.startup_timeout_sec={startup_to}"])
             cmd.extend(["-c", f"mcp_servers.openreward.tool_timeout_sec={tool_to}"])
 
@@ -533,6 +579,10 @@ class CodexAgent(BaseAgent):
             # is "-"). Avoids Windows' ~32KB CreateProcess command-line limit,
             # which truncates large prompts mid-text and leaves the agent with
             # only part of the system prompt.
+            # In resume mode we still need a `-` positional and SOMETHING on
+            # stdin — `codex exec resume <id>` with no PROMPT just exits 1
+            # with no output. We send a minimal "Continue." nudge; the agent
+            # already has the full system + env prompt in its on-disk session.
             cmd.append("-")
 
             proc_env = {**os.environ}
@@ -541,12 +591,14 @@ class CodexAgent(BaseAgent):
             # cmd with the prompt. On subsequent attempts we relaunch with
             # `codex exec resume --last` (no prompt) and rely on codex's
             # on-disk session state to pick up exactly where we left off.
+            # NOTE: `codex exec resume` does NOT accept -C/--cd; CWD is
+            # inherited from the prior session. Including -C makes codex
+            # exit 2 with "unexpected argument '-C' found".
             resume_cmd = [
                 _CODEX_BIN, "exec", "resume", "--last",
                 "--json",
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
-                "-C", str(tmppath),
             ]
             # Re-attach the same MCP/effort/provider -c overrides so the
             # resumed run uses identical config. Skip the prompt-positional
@@ -570,8 +622,11 @@ class CodexAgent(BaseAgent):
             )
 
             # Write prompt to stdin and close so codex sees EOF.
+            # Resume mode sends a minimal "Continue." instead of the full
+            # system+env prompt (which is already in the on-disk session).
             assert proc.stdin is not None
-            proc.stdin.write(full_prompt.encode("utf-8"))
+            stdin_prompt = "Continue." if _resume_thread else full_prompt
+            proc.stdin.write(stdin_prompt.encode("utf-8"))
             await proc.stdin.drain()
             proc.stdin.close()
 
@@ -585,6 +640,7 @@ class CodexAgent(BaseAgent):
             if ctx.logging and ctx.rollout_client:
                 try:
                     model_short = ctx.model.split("/")[-1]
+                    from firehorse.rollout_replay import resume_metadata
                     main_rollout = ctx.rollout_client.rollout.create(
                         run_name=ctx.run_name,
                         rollout_name=f"codex_{model_short}_{trial_id}",
@@ -592,7 +648,12 @@ class CodexAgent(BaseAgent):
                         variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"effort": ctx.effort, "model": ctx.model, "agent": "codex"},
+                        metadata={
+                            "effort": ctx.effort,
+                            "model": ctx.model,
+                            "agent": "codex",
+                            **resume_metadata(),
+                        },
                     )
                     print(
                         f"[codex] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}",
@@ -616,6 +677,20 @@ class CodexAgent(BaseAgent):
                     rollout_info=RolloutInfo(task_index=ctx.task_index, harness="codex"),
                 )
                 main_rollout.log(UserMessage(content=ctx.prompt_text))
+
+                # Resume mode: replay the dead session's messages into
+                # the new rollout so the openreward.ai view of the
+                # resumed run lines up with the original (no-op when
+                # OPENREWARD_REPLAY_ROLLOUT_ID isn't set).
+                try:
+                    from firehorse.rollout_replay import maybe_replay_into
+                    maybe_replay_into(main_rollout)
+                except Exception as _e:
+                    print(
+                        f"[codex] rollout-message replay failed: "
+                        f"{type(_e).__name__}: {_e}",
+                        file=sys.stderr,
+                    )
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
@@ -645,11 +720,18 @@ class CodexAgent(BaseAgent):
                     if not line_str:
                         continue
                     stdout_lines.append(line_str)
-                    # Detect OpenAI capacity / quota errors so we can
-                    # resume after a backoff instead of throwing away
-                    # the rollout. Codex itself does not retry on these.
-                    if ("Selected model is at capacity" in line_str
-                            or "model is at capacity" in line_str.lower()):
+                    # Detect ONLY transient OpenAI errors that retry would
+                    # actually fix. "Quota exceeded" / "insufficient_quota"
+                    # mean the project-level credit pool is empty — no
+                    # amount of backoff fixes that, so we let codex exit
+                    # and surface the error. "Selected model is at
+                    # capacity" and "rate_limit_exceeded" are transient
+                    # (model overload / per-minute rate cap) and resolve
+                    # in seconds-to-minutes — those we retry.
+                    _ll = line_str.lower()
+                    if ("selected model is at capacity" in _ll
+                            or "model is at capacity" in _ll
+                            or "rate_limit_exceeded" in _ll):
                         capacity_hit = True
                     try:
                         event = json.loads(line_str)
@@ -717,29 +799,39 @@ class CodexAgent(BaseAgent):
             try:
                 await asyncio.gather(read_stdout(), read_stderr())
                 await proc.wait()
-                # Resume-on-capacity loop. If codex died because OpenAI was
-                # `at_capacity`, sleep with exponential backoff (30 s, 60 s,
-                # 120 s, 240 s, 480 s) and relaunch codex with
-                # `exec resume --last` so it picks up the same on-disk
-                # session state. Bail after max_capacity_retries.
+                # Transient-failure retry. If codex died because of a
+                # transient capacity / rate-limit error, just relaunch
+                # the EXACT same command up to N times with backoff.
+                # This is NOT the resume path — there's no codex
+                # exec resume here, no param changes. The fresh codex
+                # process starts from the original prompt; the OR
+                # session is still alive within TTL so the env state
+                # the agent has built up is preserved.
                 while capacity_hit and capacity_attempt < max_capacity_retries:
                     capacity_attempt += 1
                     delay = backoff_base_s * (2 ** (capacity_attempt - 1))
                     print(
-                        f"[codex][{trial_id}] at_capacity — sleeping {delay:.0f}s "
-                        f"then resume (attempt {capacity_attempt}/{max_capacity_retries})",
+                        f"[codex][{trial_id}] transient error — sleeping {delay:.0f}s "
+                        f"then relaunching (attempt {capacity_attempt}/{max_capacity_retries})",
                         file=sys.stderr,
                         flush=True,
                     )
                     await asyncio.sleep(delay)
                     capacity_hit = False
                     proc = await asyncio.create_subprocess_exec(
-                        *resume_cmd,
+                        *cmd,
+                        stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         env=proc_env,
                         limit=1024 * 1024,
                     )
+                    # Same stdin handling as the initial launch.
+                    assert proc.stdin is not None
+                    retry_prompt = "Continue." if _resume_thread else full_prompt
+                    proc.stdin.write(retry_prompt.encode("utf-8"))
+                    await proc.stdin.drain()
+                    proc.stdin.close()
                     await asyncio.gather(read_stdout(), read_stderr())
                     await proc.wait()
             except Exception as e:

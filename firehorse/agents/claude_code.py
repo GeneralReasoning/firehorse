@@ -499,6 +499,7 @@ class ClaudeCodeAgent(BaseAgent):
             if ctx.logging and ctx.rollout_client:
                 try:
                     model_short = ctx.model.split("/")[-1]
+                    from firehorse.rollout_replay import resume_metadata
                     main_rollout = ctx.rollout_client.rollout.create(
                         run_name=ctx.run_name,
                         rollout_name=f"claude-code_{model_short}_{trial_id}",
@@ -506,7 +507,12 @@ class ClaudeCodeAgent(BaseAgent):
                         variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"effort": ctx.effort, "model": ctx.model, "agent": "claude-code"},
+                        metadata={
+                            "effort": ctx.effort,
+                            "model": ctx.model,
+                            "agent": "claude-code",
+                            **resume_metadata(),
+                        },
                     )
                     print(f"[claude-code] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}", file=sys.stderr)
                 except Exception as e:
@@ -547,6 +553,19 @@ class ClaudeCodeAgent(BaseAgent):
                     UserMessage(content=full_prompt),
                     rollout_info=RolloutInfo(task_index=ctx.task_index, harness="claude-code"),
                 )
+
+                # Resume mode: replay the dead session's messages into
+                # this new rollout so the openreward.ai view mirrors
+                # the original (no-op without OPENREWARD_REPLAY_ROLLOUT_ID).
+                try:
+                    from firehorse.rollout_replay import maybe_replay_into
+                    maybe_replay_into(main_rollout)
+                except Exception as _e:
+                    print(
+                        f"[claude-code] rollout-message replay failed: "
+                        f"{type(_e).__name__}: {_e}",
+                        file=sys.stderr,
+                    )
 
             # --- Read stdout and stderr concurrently ---
             turns_used = 0

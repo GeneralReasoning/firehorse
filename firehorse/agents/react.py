@@ -156,6 +156,7 @@ class ReactAgent(BaseAgent):
         if ctx.logging and ctx.rollout_client:
             try:
                 model_short = ctx.model.split("/")[-1]
+                from firehorse.rollout_replay import resume_metadata
                 rollout = ctx.rollout_client.rollout.create(
                     run_name=ctx.run_name,
                     rollout_name=f"react_{model_short}_{trial_id}",
@@ -163,7 +164,11 @@ class ReactAgent(BaseAgent):
                     variant=ctx.variant,
                     split=ctx.split,
                     task_spec=ctx.task_spec,
-                    metadata={"model": ctx.model, "agent": "react"},
+                    metadata={
+                        "model": ctx.model,
+                        "agent": "react",
+                        **resume_metadata(),
+                    },
                 )
                 print(
                     f"[react] Rollout: https://openreward.ai/rollout/{rollout.event_id}",
@@ -190,6 +195,19 @@ class ReactAgent(BaseAgent):
                 rollout_info=RolloutInfo(task_index=ctx.task_index, harness="react"),
             )
             rollout.log(UserMessage(content=ctx.prompt_text))
+
+            # Resume mode: replay the dead session's messages into this
+            # new rollout so the openreward.ai view mirrors the original
+            # (no-op without OPENREWARD_REPLAY_ROLLOUT_ID).
+            try:
+                from firehorse.rollout_replay import maybe_replay_into
+                maybe_replay_into(rollout)
+            except Exception as _e:
+                print(
+                    f"[react] rollout-message replay failed: "
+                    f"{type(_e).__name__}: {_e}",
+                    file=sys.stderr,
+                )
 
         print(f"[react] Launching with provider={provider} model={model_name}", file=sys.stderr)
 
