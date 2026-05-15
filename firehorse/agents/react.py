@@ -309,6 +309,26 @@ class ReactAgent(BaseAgent):
         tools = await ctx.session.list_tools(format="anthropic")
         messages: list[dict] = [{"role": "user", "content": ctx.prompt_text}]
 
+        # Resume mode: seed conversation from the dead session's rollout
+        # so the agent's next API call sees its full prior history as
+        # its own (proper context continuation, not a quoted transcript).
+        try:
+            from firehorse.rollout_replay import maybe_seed_messages_anthropic
+            seeded = maybe_seed_messages_anthropic()
+            if seeded is not None:
+                messages = seeded
+                print(
+                    f"[react] resumed: agent context seeded with "
+                    f"{len(messages)} prior turns",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"[react] anthropic context seed failed: "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+
         trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         turns_used = 0
         finished = False
@@ -629,6 +649,25 @@ class ReactAgent(BaseAgent):
         contents: list[Any] = [
             types.Content(role="user", parts=[types.Part(text=ctx.prompt_text)])
         ]
+
+        # Resume mode: seed conversation from the dead session's rollout
+        # so the agent's next API call sees its full prior history.
+        try:
+            from firehorse.rollout_replay import maybe_seed_messages_google
+            seeded = maybe_seed_messages_google()
+            if seeded is not None:
+                contents = seeded
+                print(
+                    f"[react] resumed: agent context seeded with "
+                    f"{len(contents)} prior turns",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(
+                f"[react] google context seed failed: "
+                f"{type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
 
         trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", ctx.task_index))
         turns_used = 0

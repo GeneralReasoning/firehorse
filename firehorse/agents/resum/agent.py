@@ -77,6 +77,37 @@ class ReSumAgent(BaseAgent):
         messages = provider.build_initial_messages(SYSTEM_PROMPT, ctx.prompt_text)
         original_prompt = ctx.prompt_text
 
+        # Resume mode: seed conversation from the dead session's rollout
+        # so the agent's next API call sees its full prior history.
+        # Only providers with a seeder available; others fall back to
+        # starting fresh (env state is still rebuilt by the bridge).
+        try:
+            if provider_name == "anthropic":
+                from firehorse.rollout_replay import maybe_seed_messages_anthropic
+                seeded = maybe_seed_messages_anthropic()
+                if seeded is not None:
+                    messages = seeded
+                    print(
+                        f"[resum] resumed: anthropic context seeded with "
+                        f"{len(messages)} prior turns",
+                        file=sys.stderr,
+                    )
+            elif provider_name == "google":
+                from firehorse.rollout_replay import maybe_seed_messages_google
+                seeded = maybe_seed_messages_google()
+                if seeded is not None:
+                    messages = seeded
+                    print(
+                        f"[resum] resumed: google context seeded with "
+                        f"{len(messages)} prior turns",
+                        file=sys.stderr,
+                    )
+        except Exception as e:
+            print(
+                f"[resum] context seed failed: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+
         # --- Setup logging ---
         trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", "unknown"))
         log_dir = Path(ctx.output_dir) if ctx.output_dir else None

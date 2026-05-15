@@ -40,6 +40,11 @@ _ROLLOUT_URL_RE = re.compile(
     r"Rollout:\s*https?://[^\s]+?/rollout/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
 )
 
+# Per-process cache. The fetch is a single HTTP call but we hit it from
+# multiple places during resume (rollout-mirror, agent context seed) and
+# the SDK pushes to OR async — cleaner to fetch once.
+_ORIG_MSGS_CACHE: Optional[list[dict]] = None
+
 
 def extract_rollout_id_from_run_log(results_dir: Path) -> Optional[str]:
     """Scan run.log for `[<agent>] Rollout: https://openreward.ai/rollout/<id>`.
@@ -57,6 +62,41 @@ def extract_rollout_id_from_run_log(results_dir: Path) -> Optional[str]:
         return None
     m = _ROLLOUT_URL_RE.search(text)
     return m.group(1) if m else None
+
+
+def _coerce_content(c: Any) -> str:
+    if isinstance(c, str):
+        return c
+    if c is None:
+        return ""
+    try:
+        return json.dumps(c)
+    except Exception:
+        return str(c)
+
+
+def _get_orig_messages_cached() -> Optional[list[dict]]:
+    """Fetch the orig rollout's messages once per process; cache thereafter.
+
+    Returns None when the env vars aren't set or the fetch failed.
+    """
+    global _ORIG_MSGS_CACHE
+    if _ORIG_MSGS_CACHE is not None:
+        return _ORIG_MSGS_CACHE
+    rid = os.environ.get("OPENREWARD_REPLAY_ROLLOUT_ID")
+    api_key = os.environ.get("OPENREWARD_API_KEY")
+    if not (rid and api_key):
+        return None
+    try:
+        _ORIG_MSGS_CACHE = fetch_rollout_messages(rid, api_key)
+        return _ORIG_MSGS_CACHE
+    except Exception as e:
+        print(
+            f"[rollout-replay] could not fetch orig rollout {rid}: "
+            f"{type(e).__name__}: {e}",
+            file=sys.stderr, flush=True,
+        )
+        return None
 
 
 def fetch_rollout_messages(rollout_id: str, api_key: str) -> list[dict]:
@@ -250,6 +290,216 @@ def resume_metadata() -> dict:
         "resumed_from_rollout_url": f"https://openreward.ai/rollout/{rid}",
         "resume_kind": "firehorse",
     }
+
+
+# ---------------------------------------------------------------------------
+# Agent-context seeders — convert the orig rollout's normalized message list
+# back into provider-native message arrays so the resumed agent's next API
+# call sees the full prior conversation as its own.
+#
+# Used by python-driven harnesses (react, resum) where firehorse owns the
+# conversation. CLI-driven agents (codex / claude_code / gemini CLI) can't
+# use this — their conversation lives in their own session store.
+# ---------------------------------------------------------------------------
+
+
+def _orig_to_anthropic_messages(orig_messages: list[dict]) -> list[dict]:
+    """Group OR's flat normalized events into Anthropic API turns.
+
+    The Anthropic Messages API expects alternating user/assistant turns:
+      assistant turn  = [{type:text}, {type:thinking}, {type:tool_use}...]
+      user turn       = [{type:tool_result, tool_use_id, content}...]
+
+    We collapse consecutive assistant_message/reasoning/tool_call events
+    into a single assistant turn, and consecutive tool_results into a
+    single user turn. system_message is omitted (it goes in `system=`).
+    """
+    out: list[dict] = []
+    assistant_buf: list[dict] | None = None
+    user_tool_buf: list[dict] | None = None
+
+    def _flush_assistant() -> None:
+        nonlocal assistant_buf
+        if assistant_buf:
+            out.append({"role": "assistant", "content": assistant_buf})
+            assistant_buf = None
+
+    def _flush_user_tool() -> None:
+        nonlocal user_tool_buf
+        if user_tool_buf:
+            out.append({"role": "user", "content": user_tool_buf})
+            user_tool_buf = None
+
+    for m in orig_messages:
+        t = m.get("type")
+        content = _coerce_content(m.get("content"))
+
+        if t == "system_message":
+            continue
+        if t == "user_message":
+            _flush_assistant()
+            _flush_user_tool()
+            out.append({"role": "user", "content": content})
+            continue
+        if t in ("assistant_message", "reasoning", "tool_call"):
+            _flush_user_tool()
+            if assistant_buf is None:
+                assistant_buf = []
+            if t == "assistant_message":
+                if content:
+                    assistant_buf.append({"type": "text", "text": content})
+            elif t == "reasoning":
+                thinking = content or m.get("summary") or ""
+                if thinking:
+                    assistant_buf.append({"type": "thinking", "thinking": thinking})
+            else:  # tool_call
+                try:
+                    args = json.loads(content) if content else {}
+                    if not isinstance(args, dict):
+                        args = {}
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+                assistant_buf.append({
+                    "type": "tool_use",
+                    "id": m.get("callId") or f"call_{m.get('index', '?')}",
+                    "name": m.get("name") or "unknown",
+                    "input": args,
+                })
+        elif t == "tool_result":
+            _flush_assistant()
+            if user_tool_buf is None:
+                user_tool_buf = []
+            user_tool_buf.append({
+                "type": "tool_result",
+                "tool_use_id": m.get("callId") or f"call_{m.get('index', '?')}",
+                "content": content,
+            })
+
+    _flush_assistant()
+    _flush_user_tool()
+    return out
+
+
+def _orig_to_google_contents(orig_messages: list[dict]) -> list[Any]:
+    """Group OR's flat events into Google Gemini's `types.Content` list.
+
+    Each Content has role ("user" | "model") and parts (Part objects).
+    Tool calls live in model turns as function_call Parts; tool results
+    in user turns as function_response Parts. system_message is omitted
+    (it goes in `system_instruction=`).
+    """
+    # Import lazily so non-Gemini callers don't need google-genai installed.
+    from google.genai import types  # type: ignore
+
+    out: list[Any] = []
+    model_parts: list[Any] | None = None
+    user_parts: list[Any] | None = None
+    # callId → tool name for matching tool_result back to its tool_call
+    call_name_by_id: dict[str, str] = {}
+
+    def _flush_model() -> None:
+        nonlocal model_parts
+        if model_parts:
+            out.append(types.Content(role="model", parts=model_parts))
+            model_parts = None
+
+    def _flush_user() -> None:
+        nonlocal user_parts
+        if user_parts:
+            out.append(types.Content(role="user", parts=user_parts))
+            user_parts = None
+
+    for m in orig_messages:
+        t = m.get("type")
+        content = _coerce_content(m.get("content"))
+
+        if t == "system_message":
+            continue
+        if t == "user_message":
+            _flush_model()
+            _flush_user()
+            out.append(types.Content(role="user", parts=[types.Part(text=content)]))
+            continue
+        if t in ("assistant_message", "reasoning", "tool_call"):
+            _flush_user()
+            if model_parts is None:
+                model_parts = []
+            if t == "assistant_message":
+                if content:
+                    model_parts.append(types.Part(text=content))
+            elif t == "reasoning":
+                thinking = content or m.get("summary") or ""
+                if thinking:
+                    # Gemini reasoning is a text Part with thought=True
+                    model_parts.append(types.Part(text=thinking, thought=True))
+            else:  # tool_call
+                try:
+                    args = json.loads(content) if content else {}
+                    if not isinstance(args, dict):
+                        args = {}
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+                name = m.get("name") or "unknown"
+                call_name_by_id[m.get("callId") or ""] = name
+                model_parts.append(types.Part.from_function_call(name=name, args=args))
+        elif t == "tool_result":
+            _flush_model()
+            if user_parts is None:
+                user_parts = []
+            cid = m.get("callId") or ""
+            name = call_name_by_id.get(cid) or m.get("name") or "unknown"
+            user_parts.append(types.Part.from_function_response(
+                name=name,
+                response={"result": content},
+            ))
+
+    _flush_model()
+    _flush_user()
+    return out
+
+
+def maybe_seed_messages_anthropic() -> Optional[list[dict]]:
+    """Return an Anthropic-format `messages` list seeded from the orig rollout.
+
+    No-op (returns None) outside of `firehorse resume`. Call sites that
+    own a `messages` list should replace it with this when non-None:
+
+        seeded = maybe_seed_messages_anthropic()
+        if seeded is not None:
+            messages = seeded
+    """
+    msgs = _get_orig_messages_cached()
+    if not msgs:
+        return None
+    seeded = _orig_to_anthropic_messages(msgs)
+    print(
+        f"[rollout-replay] seeded anthropic context: "
+        f"{len(seeded)} turns from {len(msgs)} flat events",
+        file=sys.stderr, flush=True,
+    )
+    return seeded
+
+
+def maybe_seed_messages_google() -> Optional[list[Any]]:
+    """Return a Gemini-format `contents` list seeded from the orig rollout."""
+    msgs = _get_orig_messages_cached()
+    if not msgs:
+        return None
+    try:
+        seeded = _orig_to_google_contents(msgs)
+    except ImportError:
+        print(
+            "[rollout-replay] google-genai not installed; cannot seed "
+            "Gemini context. The resumed agent will start fresh.",
+            file=sys.stderr, flush=True,
+        )
+        return None
+    print(
+        f"[rollout-replay] seeded gemini context: "
+        f"{len(seeded)} turns from {len(msgs)} flat events",
+        file=sys.stderr, flush=True,
+    )
+    return seeded
 
 
 def maybe_replay_into(main_rollout: Any) -> Optional[dict]:
