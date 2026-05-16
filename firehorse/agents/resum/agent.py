@@ -77,6 +77,37 @@ class ReSumAgent(BaseAgent):
         messages = provider.build_initial_messages(SYSTEM_PROMPT, ctx.prompt_text)
         original_prompt = ctx.prompt_text
 
+        # Resume mode: seed conversation from the dead session's rollout
+        # so the agent's next API call sees its full prior history.
+        # Only providers with a seeder available; others fall back to
+        # starting fresh (env state is still rebuilt by the bridge).
+        try:
+            if provider_name == "anthropic":
+                from firehorse.rollout_replay import maybe_seed_messages_anthropic
+                seeded = maybe_seed_messages_anthropic()
+                if seeded is not None:
+                    messages = seeded
+                    print(
+                        f"[resum] resumed: anthropic context seeded with "
+                        f"{len(messages)} prior turns",
+                        file=sys.stderr,
+                    )
+            elif provider_name == "google":
+                from firehorse.rollout_replay import maybe_seed_messages_google
+                seeded = maybe_seed_messages_google()
+                if seeded is not None:
+                    messages = seeded
+                    print(
+                        f"[resum] resumed: google context seeded with "
+                        f"{len(messages)} prior turns",
+                        file=sys.stderr,
+                    )
+        except Exception as e:
+            print(
+                f"[resum] context seed failed: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+
         # --- Setup logging ---
         trial_id = ctx.task_spec.get("id", ctx.task_spec.get("index", "unknown"))
         log_dir = Path(ctx.output_dir) if ctx.output_dir else None
@@ -88,6 +119,7 @@ class ReSumAgent(BaseAgent):
         if ctx.logging and ctx.rollout_client:
             try:
                 model_short = ctx.model.split("/")[-1]
+                from firehorse.rollout_replay import resume_metadata
                 rollout = ctx.rollout_client.rollout.create(
                     run_name=ctx.run_name,
                     rollout_name=f"resum_{model_short}_{trial_id}",
@@ -100,6 +132,7 @@ class ReSumAgent(BaseAgent):
                         "effort": ctx.effort,
                         "model": ctx.model,
                         "agent": "resum",
+                        **resume_metadata(),
                     },
                 )
                 print(
@@ -116,6 +149,20 @@ class ReSumAgent(BaseAgent):
             "environment_prompt": ctx.prompt_text,
         })
         self._log_rollout_system_and_prompt(rollout, SYSTEM_PROMPT, ctx.prompt_text, ctx.task_index)
+
+        # Resume mode: replay the dead session's messages into this new
+        # rollout so the openreward.ai view mirrors the original
+        # (no-op without OPENREWARD_REPLAY_ROLLOUT_ID).
+        if rollout:
+            try:
+                from firehorse.rollout_replay import maybe_replay_into
+                maybe_replay_into(rollout)
+            except Exception as _e:
+                print(
+                    f"[resum] rollout-message replay failed: "
+                    f"{type(_e).__name__}: {_e}",
+                    file=sys.stderr,
+                )
 
         # --- Core loop ---
         max_turns = ctx.max_turns

@@ -36,13 +36,18 @@ async def run_trial(
     start = time.monotonic()
 
     # Map agent names to SDK toolset names. These toolsets provide optimized
-    # tool descriptions for each agent type.
+    # tool descriptions for each agent type. A non-None config.toolset always
+    # wins (incl. the empty string, which means "no toolset" — use the env's
+    # own tools directly, for envs without a sandbox).
     _AGENT_TO_TOOLSET = {
         "claude-code": "claude-code",
         "codex": "codex",
         "gemini": "gemini-cli",
     }
-    toolset_name = _AGENT_TO_TOOLSET.get(agent.name)
+    if config.toolset is None:
+        toolset_name = _AGENT_TO_TOOLSET.get(agent.name)
+    else:
+        toolset_name = config.toolset or None
 
     try:
         session_secrets = config.secrets or None

@@ -56,6 +56,24 @@ class OpenRewardBridge:
 
         self.server.list_tools()(self._list_tools)
         self.server.call_tool(validate_input=False)(self._call_tool)
+        # Codex CLI probes resources/list, resources/templates/list, and
+        # prompts/list during MCP startup. We don't expose any of those, but
+        # without explicit handlers the requests time out (30s), and the
+        # error messages leak into the agent's own captured output where the
+        # model sees them and wastes tokens trying to debug. Register empty
+        # handlers so the probes return immediately.
+        self.server.list_resources()(self._list_resources_empty)
+        self.server.list_resource_templates()(self._list_resource_templates_empty)
+        self.server.list_prompts()(self._list_prompts_empty)
+
+    async def _list_resources_empty(self) -> list:
+        return []
+
+    async def _list_resource_templates_empty(self) -> list:
+        return []
+
+    async def _list_prompts_empty(self) -> list:
+        return []
 
     async def initialize(self):
         env_name = os.environ["OPENREWARD_ENV_NAME"]
@@ -138,6 +156,159 @@ class OpenRewardBridge:
             self._toolcalls_file = open(toolcalls_path, "w")
 
         print(f"[openreward-bridge] Session created, {len(self.tools)} tools available", file=sys.stderr)
+
+        # Resume replay: if OPENREWARD_REPLAY_PATH points to a JSON file
+        # produced by `firehorse resume`/`firehorse replay`, fast-replay
+        # each prior successful tool call against this fresh OR session
+        # so its env state matches the dead session before the agent's
+        # first turn. See firehorse/resume.py for the manifest schema.
+        #
+        # We also set OPENREWARD_REPLAY_MODE=1 in the env process for
+        # the duration of the replay so env code can detect it and
+        # short-circuit any non-idempotent side effects (logging,
+        # external webhooks, telemetry, etc.).
+        replay_path = os.environ.get("OPENREWARD_REPLAY_PATH")
+        if replay_path:
+            try:
+                manifest = json.loads(open(replay_path, encoding="utf-8").read())
+                calls = manifest.get("tool_calls", [])
+                # If firehorse passed OPENREWARD_REPLAY_PROGRESS_FILE,
+                # mirror each replay event to that file as a JSONL
+                # record. Firehorse tails it in real time and surfaces
+                # `[REPLAY N/M]` lines in the user's terminal — codex
+                # buffers MCP subprocess stderr too aggressively for
+                # the bridge's own prints to surface live.
+                _progress_path = os.environ.get("OPENREWARD_REPLAY_PROGRESS_FILE")
+                _progress_fh = None
+                if _progress_path:
+                    try:
+                        _progress_fh = open(_progress_path, "w", buffering=1)
+                        _progress_fh.write(json.dumps({
+                            "event": "begin",
+                            "total": len(calls),
+                        }) + "\n")
+                    except Exception as _e:
+                        print(
+                            f"[openreward-bridge] could not open progress file "
+                            f"{_progress_path}: {type(_e).__name__}: {_e}",
+                            file=sys.stderr, flush=True,
+                        )
+                        _progress_fh = None
+
+                print(
+                    f"[openreward-bridge] REPLAY MODE BEGIN — "
+                    f"replaying {len(calls)} prior tool calls from "
+                    f"{replay_path} (no LLM in the loop)",
+                    file=sys.stderr, flush=True,
+                )
+                # Hint to env code that we're not driving the agent right now.
+                # Env can check os.environ.get("OPENREWARD_REPLAY_MODE") == "1"
+                # to skip side effects.
+                os.environ["OPENREWARD_REPLAY_MODE"] = "1"
+                # Only env-side tools can be replayed against OR's session.
+                # The trial JSONL also records codex built-ins (bash,
+                # multi_edit, ls, ...) — those are agent-local and OR has
+                # no handler, so sending them produces "unknown tool"
+                # entries that pollute the replay rollout. Filter to the
+                # set OR actually exposes.
+                or_tool_names = {t.name for t in self.tools}
+                try:
+                    ok = 0
+                    fail = 0
+                    skipped = 0
+                    for i, tc in enumerate(calls):
+                        tool = tc.get("tool", "")
+                        args = tc.get("arguments", {}) or {}
+                        if tool not in or_tool_names:
+                            skipped += 1
+                            print(
+                                f"[openreward-bridge] REPLAY {i+1:>4}/{len(calls)} "
+                                f"tool={tool} SKIP (agent-side, not an OR tool)",
+                                file=sys.stderr, flush=True,
+                            )
+                            if _progress_fh is not None:
+                                _progress_fh.write(json.dumps({
+                                    "event": "call",
+                                    "i": i + 1,
+                                    "total": len(calls),
+                                    "tool": tool,
+                                    "ok": True,
+                                    "skipped": True,
+                                    "reason": "not an OR tool",
+                                }) + "\n")
+                            continue
+                        try:
+                            result = await self._session.call_tool(tool, args)
+                            ok += 1
+                            print(
+                                f"[openreward-bridge] REPLAY {i+1:>4}/{len(calls)} "
+                                f"tool={tool} ok",
+                                file=sys.stderr, flush=True,
+                            )
+                            if _progress_fh is not None:
+                                _progress_fh.write(json.dumps({
+                                    "event": "call",
+                                    "i": i + 1,
+                                    "total": len(calls),
+                                    "tool": tool,
+                                    "ok": True,
+                                }) + "\n")
+                        except Exception as e:
+                            fail += 1
+                            print(
+                                f"[openreward-bridge] REPLAY: call {i+1}/{len(calls)} "
+                                f"({tool}) raised {type(e).__name__}: {e}",
+                                file=sys.stderr, flush=True,
+                            )
+                            if _progress_fh is not None:
+                                _progress_fh.write(json.dumps({
+                                    "event": "call",
+                                    "i": i + 1,
+                                    "total": len(calls),
+                                    "tool": tool,
+                                    "ok": False,
+                                    "error": f"{type(e).__name__}: {e}",
+                                }) + "\n")
+                finally:
+                    os.environ.pop("OPENREWARD_REPLAY_MODE", None)
+                if _progress_fh is not None:
+                    try:
+                        _progress_fh.write(json.dumps({
+                            "event": "complete",
+                            "ok": ok,
+                            "fail": fail,
+                            "skipped": skipped,
+                            "total": len(calls),
+                        }) + "\n")
+                        _progress_fh.close()
+                    except Exception:
+                        pass
+                print(
+                    f"[openreward-bridge] REPLAY COMPLETE — ok={ok} fail={fail} "
+                    f"skipped={skipped} (agent-side tools); handing off to agent",
+                    file=sys.stderr, flush=True,
+                )
+                # Replay-only mode: caller wants the env state rebuilt
+                # and that's it. Don't hand off to the agent.
+                if os.environ.get("OPENREWARD_REPLAY_ONLY") == "1":
+                    print(
+                        "[openreward-bridge] REPLAY_ONLY=1 — exiting bridge "
+                        "without serving tools.",
+                        file=sys.stderr, flush=True,
+                    )
+                    # Caller (firehorse replay) is expected to read this
+                    # signal and terminate. Sleep briefly so the message
+                    # actually flushes before stdin close kills us.
+                    await asyncio.sleep(0.5)
+                    sys.exit(0)
+            except SystemExit:
+                raise
+            except Exception as e:
+                print(
+                    f"[openreward-bridge] Replay aborted: "
+                    f"{type(e).__name__}: {e}",
+                    file=sys.stderr, flush=True,
+                )
 
     def _load_prebuilt_tools(self) -> list[Tool] | None:
         """Load pre-built tool specs from env var for instant list_tools response.

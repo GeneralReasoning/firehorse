@@ -348,6 +348,7 @@ class GeminiAgent(BaseAgent):
             if ctx.logging and ctx.rollout_client:
                 try:
                     model_short = ctx.model.split("/")[-1]
+                    from firehorse.rollout_replay import resume_metadata
                     main_rollout = ctx.rollout_client.rollout.create(
                         run_name=ctx.run_name,
                         rollout_name=f"gemini_{model_short}_{trial_id}",
@@ -355,7 +356,12 @@ class GeminiAgent(BaseAgent):
                         variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"effort": ctx.effort, "model": ctx.model, "agent": "gemini"},
+                        metadata={
+                            "effort": ctx.effort,
+                            "model": ctx.model,
+                            "agent": "gemini",
+                            **resume_metadata(),
+                        },
                     )
                     print(
                         f"[gemini] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}",
@@ -379,12 +385,36 @@ class GeminiAgent(BaseAgent):
                     rollout_info=RolloutInfo(task_index=ctx.task_index, harness="gemini"),
                 )
 
+                # Resume mode: replay the dead session's messages into
+                # this new rollout so the openreward.ai view mirrors
+                # the original (no-op without OPENREWARD_REPLAY_ROLLOUT_ID).
+                try:
+                    from firehorse.rollout_replay import maybe_replay_into
+                    maybe_replay_into(main_rollout)
+                except Exception as _e:
+                    print(
+                        f"[gemini] rollout-message replay failed: "
+                        f"{type(_e).__name__}: {_e}",
+                        file=sys.stderr,
+                    )
+
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
             stdout_lines: list[str] = []
             result_stats: dict | None = None
             mcp_failed = False
             accumulated_text: list[str] = []
+            run_started = time.monotonic()
+
+            def _heartbeat(tool_name: str) -> None:
+                elapsed = time.monotonic() - run_started
+                short = tool_name.replace("mcp__openreward__", "") or "?"
+                print(
+                    f"[gemini][{trial_id}] turn {turns_used} ({elapsed:5.0f}s) "
+                    f"→ {short}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             async def read_stdout():
                 nonlocal turns_used, result_stats, mcp_failed
@@ -412,6 +442,7 @@ class GeminiAgent(BaseAgent):
                     # Track tool calls as turns
                     if event.get("type") == "tool_use":
                         turns_used += 1
+                        _heartbeat(event.get("tool_name", ""))
 
                     # Capture result stats
                     if event.get("type") == "result":

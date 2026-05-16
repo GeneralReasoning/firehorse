@@ -6,10 +6,17 @@ import collections
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
+
+# asyncio.create_subprocess_exec on Windows uses CreateProcess directly and
+# does not honor PATHEXT, so a bare "claude" fails when only claude.cmd is on
+# PATH (the typical npm-global install). Resolve once via shutil.which.
+_CLAUDE_BIN = shutil.which("claude") or "claude"
 
 from openreward import (
     AssistantMessage,
@@ -309,7 +316,7 @@ class ClaudeCodeAgent(BaseAgent):
 
     async def setup(self) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "claude", "--version",
+            _CLAUDE_BIN, "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -394,7 +401,7 @@ class ClaudeCodeAgent(BaseAgent):
 
             # Build command
             cmd = [
-                "claude",
+                _CLAUDE_BIN,
                 "--print",
                 "--verbose",
                 "--output-format", "stream-json",
@@ -425,18 +432,46 @@ class ClaudeCodeAgent(BaseAgent):
             if submission_reminder:
                 full_prompt = f"{full_prompt}\n\n{submission_reminder}"
             full_prompt = _sanitize_prompt(full_prompt)
-            cmd.extend(["-p", full_prompt])
+            # Pipe the prompt via stdin instead of `-p <prompt>`. Claude
+            # Code 2.1.x no longer accepts -p as a prompt-argument flag
+            # in --print mode (it's now a synonym for --print itself);
+            # passing `-p <text>` gets parsed as setting --print=<text>
+            # and the CLI then errors out with:
+            #   "Input must be provided either through stdin or as a
+            #    prompt argument when using --print"
+            # stdin works on every Claude Code version we've seen.
             proc_env = {**os.environ, **extra_env}
+            # Claude Code's default MCP startup timeout (30 s) is tight for
+            # Python-based MCP servers on Windows: the interpreter cold-start
+            # plus aiohttp/openreward imports alone takes ~4-8 s, and the
+            # openreward `initialize` adds further latency. Without this
+            # bump, `firehorse.mcp` lands in status='pending' and the trial
+            # aborts with "MCP failed, agent making futile calls". Honor an
+            # operator override but default high enough for Windows.
+            proc_env.setdefault("MCP_TIMEOUT", "120000")
 
             print(f"[claude-code] Launching with model={model_name}", file=sys.stderr)
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=proc_env,
                 limit=_SUBPROCESS_LINE_LIMIT,
             )
+            # Send the prompt over stdin and close it so the CLI gets
+            # EOF and starts processing. Best-effort — the CLI surfaces
+            # any input issue via stderr / non-zero exit.
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.write(full_prompt.encode("utf-8"))
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+            except (BrokenPipeError, ConnectionResetError):
+                # CLI exited before we finished writing — its stderr
+                # already captures the failure cause.
+                pass
 
             # --- Set up JSONL logging ---
             main_log = None
@@ -464,6 +499,7 @@ class ClaudeCodeAgent(BaseAgent):
             if ctx.logging and ctx.rollout_client:
                 try:
                     model_short = ctx.model.split("/")[-1]
+                    from firehorse.rollout_replay import resume_metadata
                     main_rollout = ctx.rollout_client.rollout.create(
                         run_name=ctx.run_name,
                         rollout_name=f"claude-code_{model_short}_{trial_id}",
@@ -471,7 +507,12 @@ class ClaudeCodeAgent(BaseAgent):
                         variant=ctx.variant,
                         split=ctx.split,
                         task_spec=ctx.task_spec,
-                        metadata={"effort": ctx.effort, "model": ctx.model, "agent": "claude-code"},
+                        metadata={
+                            "effort": ctx.effort,
+                            "model": ctx.model,
+                            "agent": "claude-code",
+                            **resume_metadata(),
+                        },
                     )
                     print(f"[claude-code] Rollout: https://openreward.ai/rollout/{main_rollout.event_id}", file=sys.stderr)
                 except Exception as e:
@@ -513,6 +554,19 @@ class ClaudeCodeAgent(BaseAgent):
                     rollout_info=RolloutInfo(task_index=ctx.task_index, harness="claude-code"),
                 )
 
+                # Resume mode: replay the dead session's messages into
+                # this new rollout so the openreward.ai view mirrors
+                # the original (no-op without OPENREWARD_REPLAY_ROLLOUT_ID).
+                try:
+                    from firehorse.rollout_replay import maybe_replay_into
+                    maybe_replay_into(main_rollout)
+                except Exception as _e:
+                    print(
+                        f"[claude-code] rollout-message replay failed: "
+                        f"{type(_e).__name__}: {_e}",
+                        file=sys.stderr,
+                    )
+
             # --- Read stdout and stderr concurrently ---
             turns_used = 0
             stdout_lines: list[str] = []
@@ -522,6 +576,13 @@ class ClaudeCodeAgent(BaseAgent):
             mcp_tool_use_ids: dict[str, str] = {}  # tool_use_id -> mcp tool name
             mcp_result_count = 0
             bridge_stderr: collections.deque[str] = collections.deque(maxlen=20)
+            # For periodic progress reporting — Claude Code rollouts on
+            # large envs can run silently for many minutes, which looks
+            # indistinguishable from a hung process. We print a one-liner
+            # every Nth assistant tool call with the elapsed wall-clock
+            # time and current tool name.
+            run_started = time.monotonic()
+            PROGRESS_EVERY_N_TOOLS = 1  # print on every tool call
 
             async def read_stdout():
                 nonlocal turns_used, result_event, mcp_failed, mcp_failed_tool_calls, mcp_result_count
@@ -549,18 +610,32 @@ class ClaudeCodeAgent(BaseAgent):
                     if rollout:
                         _log_event_to_rollout(event, rollout, seen_reasoning=seen_reasoning)
 
-                    # Detect MCP server failure from system.init event
+                    # Detect MCP server failure from system.init event.
+                    # Note: Claude Code 2.1.138 emits system.init before MCP
+                    # stdio servers finish booting, so "pending" at this point
+                    # is a normal transient state — wait for tool_result
+                    # errors to confirm. Only definitively-bad statuses count.
                     if event.get("type") == "system" and event.get("subtype") == "init":
+                        _BAD_MCP_STATUSES = {"failed", "error", "needs-auth", "disconnected"}
                         for srv in event.get("mcp_servers", []):
-                            if srv.get("name") == "openreward" and srv.get("status") != "connected":
-                                mcp_failed = True
-                                extra = {k: v for k, v in srv.items() if k not in ("name", "status")}
-                                detail = f" details={extra}" if extra else ""
-                                print(
-                                    f"[claude-code][{trial_id}] MCP 'openreward' status="
-                                    f"{srv.get('status')!r}{detail} — will abort after first futile calls",
-                                    file=sys.stderr,
-                                )
+                            if srv.get("name") == "openreward":
+                                status = srv.get("status")
+                                if status in _BAD_MCP_STATUSES:
+                                    mcp_failed = True
+                                    extra = {k: v for k, v in srv.items() if k not in ("name", "status")}
+                                    detail = f" details={extra}" if extra else ""
+                                    print(
+                                        f"[claude-code][{trial_id}] MCP 'openreward' status="
+                                        f"{status!r}{detail} — will abort after first futile calls",
+                                        file=sys.stderr,
+                                    )
+                                elif status != "connected":
+                                    # "pending" / unknown — log but don't abort yet.
+                                    print(
+                                        f"[claude-code][{trial_id}] MCP 'openreward' status={status!r} "
+                                        f"(still starting); will confirm via tool calls",
+                                        file=sys.stderr,
+                                    )
 
                     # Track the result event (has cost/token data)
                     if event.get("type") == "result":
@@ -577,23 +652,19 @@ class ClaudeCodeAgent(BaseAgent):
                                 tool_use_id = block.get("id", "")
                                 if tool_name.startswith("mcp__openreward__"):
                                     mcp_tool_use_ids[tool_use_id] = tool_name
-                                # Abort if MCP failed and agent is making futile calls
-                                if mcp_failed:
-                                    mcp_failed_tool_calls += 1
-                                    if mcp_failed_tool_calls >= 2:
-                                        tail = "\n    ".join(list(bridge_stderr)[-5:]) or \
-                                            "(no [openreward-bridge] output captured)"
-                                        print(
-                                            f"[claude-code][{trial_id}] MCP failed, agent making futile "
-                                            f"calls — terminating\n"
-                                            f"  last bridge output:\n    {tail}\n"
-                                            f"  common causes: missing/invalid OPENREWARD_API_KEY, "
-                                            f"backend rejecting env/task, or high concurrency "
-                                            f"overloading the backend",
-                                            file=sys.stderr,
-                                        )
-                                        proc.kill()
-                                        return
+                                # Heartbeat — print a short status line so the
+                                # operator can see the trial is making
+                                # progress. Strips the long mcp__openreward__
+                                # prefix for readability.
+                                if turns_used % PROGRESS_EVERY_N_TOOLS == 0:
+                                    elapsed = time.monotonic() - run_started
+                                    short = tool_name.replace("mcp__openreward__", "")
+                                    print(
+                                        f"[claude-code][{trial_id}] turn {turns_used} "
+                                        f"({elapsed:5.0f}s) → {short}",
+                                        file=sys.stderr,
+                                        flush=True,
+                                    )
 
                     # Annotate MCP tool results with call_count for reward file correlation.
                     # Only count successful calls (is_error=False) since the bridge only
@@ -618,6 +689,30 @@ class ClaudeCodeAgent(BaseAgent):
                                         "is_error": is_error,
                                     }
                                     log_file.write(json.dumps(annotation) + "\n")
+                                    # Count *actual* MCP failures, not just any
+                                    # tool call. Abort only after we've seen
+                                    # two real error responses — by then the
+                                    # MCP server has had plenty of time to come
+                                    # up and is genuinely not working.
+                                    if is_error:
+                                        mcp_failed_tool_calls += 1
+                                        if mcp_failed_tool_calls >= 2:
+                                            tail = "\n    ".join(list(bridge_stderr)[-5:]) or \
+                                                "(no [openreward-bridge] output captured)"
+                                            print(
+                                                f"[claude-code][{trial_id}] MCP returning errors on "
+                                                f"{mcp_failed_tool_calls} consecutive calls — terminating\n"
+                                                f"  last bridge output:\n    {tail}\n"
+                                                f"  common causes: missing/invalid OPENREWARD_API_KEY, "
+                                                f"backend rejecting env/task, or high concurrency "
+                                                f"overloading the backend",
+                                                file=sys.stderr,
+                                            )
+                                            proc.kill()
+                                            return
+                                    else:
+                                        # Reset the streak on any successful call.
+                                        mcp_failed_tool_calls = 0
 
             async def read_stderr():
                 assert proc.stderr is not None

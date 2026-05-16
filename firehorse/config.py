@@ -25,6 +25,12 @@ class RunConfig:
     logging: bool = True
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
+    # Toolset override. None = use agent-default mapping (in trial.py).
+    # Empty string = explicitly request no toolset (env serves its own tools
+    # without an SDK-side toolset wrapper). Use this for envs that have no
+    # sandbox declared and therefore can't satisfy the codex/claude-code
+    # toolset's sandbox requirement.
+    toolset: str | None = None
 
     def effective_run_name(self) -> str:
         if self.run_name:
@@ -55,3 +61,4 @@ class TrialConfig:
     use_builtin_descriptions: bool = True
     use_all_filesystem_tools: bool = False
     plan_mode: bool = False
+    toolset: str | None = None
