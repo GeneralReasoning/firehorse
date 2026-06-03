@@ -9,11 +9,13 @@ def _register_defaults():
     from firehorse.agents.claude_code import ClaudeCodeAgent
     from firehorse.agents.codex import CodexAgent
     from firehorse.agents.gemini import GeminiAgent
+    from firehorse.agents.hermes import HermesAgent
     from firehorse.agents.react import ReactAgent
     from firehorse.agents.resum import ReSumAgent
     AGENT_REGISTRY["claude-code"] = ClaudeCodeAgent
     AGENT_REGISTRY["codex"] = CodexAgent
     AGENT_REGISTRY["gemini"] = GeminiAgent
+    AGENT_REGISTRY["hermes"] = HermesAgent
     AGENT_REGISTRY["react"] = ReactAgent
     AGENT_REGISTRY["resum"] = ReSumAgent
 
