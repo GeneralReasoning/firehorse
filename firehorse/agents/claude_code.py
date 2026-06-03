@@ -5,7 +5,6 @@ import base64
 import collections
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -28,7 +27,7 @@ from openreward import (
 from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
-from firehorse.mcp.convert import strip_or_reward_marker
+from firehorse.mcp.convert import parse_or_reward_marker, strip_or_reward_marker
 
 # Map of lowercase env tool names -> Claude built-in tool names they should replace
 ENV_TO_BUILTIN = {
@@ -286,17 +285,11 @@ def _log_event_to_rollout(
                     )
                 content_str = str(content)
 
-                # Extract reward/finished from [OR_REWARD:{"r":...,"f":...}] tag
-                reward = None
-                is_finished = False
-                m = re.search(r'\[OR_REWARD:(\{[^}]+\})\]', content_str)
-                if m:
-                    try:
-                        rd = json.loads(m.group(1))
-                        reward = rd.get("r")
-                        is_finished = rd.get("f", False)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
+                # Extract reward/finished from the *last* [OR_REWARD:{...}] tag —
+                # the bridge always appends its authoritative marker at the end of
+                # the tool-result text, so match-last short-circuits any markers
+                # an env tool may have echoed back from the model's input.
+                reward, is_finished = parse_or_reward_marker(content_str)
 
                 rollout.log(
                     ToolResult(

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 import tempfile
 import time
@@ -19,7 +18,7 @@ from openreward import (
 from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
-from firehorse.mcp.convert import strip_or_reward_marker
+from firehorse.mcp.convert import parse_or_reward_marker, strip_or_reward_marker
 
 # Generic env tool names to exclude when gemini-cli toolset is active.
 # The toolset provides both generic names (bash, read, write, ...) and
@@ -159,17 +158,9 @@ def _log_gemini_event_to_rollout(
             content_str = json.dumps(content_str)
         content_str = str(content_str)
 
-        # Parse [OR_REWARD:{...}] tag from MCP bridge output
-        reward = None
-        is_finished = False
-        m = re.search(r'\[OR_REWARD:(\{[^}]+\})\]', content_str)
-        if m:
-            try:
-                rd = json.loads(m.group(1))
-                reward = rd.get("r")
-                is_finished = rd.get("f", False)
-            except (json.JSONDecodeError, AttributeError):
-                pass
+        # Parse the last [OR_REWARD:{...}] tag — bridge always appends its
+        # authoritative marker at the end of the tool-result text.
+        reward, is_finished = parse_or_reward_marker(content_str)
 
         rollout.log(
             ToolResult(
