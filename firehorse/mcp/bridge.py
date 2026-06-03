@@ -534,7 +534,23 @@ class OpenRewardBridge:
                 await self.server.run(
                     read_stream,
                     write_stream,
-                    self.server.create_initialization_options(),
+                    self._initialization_options(),
                 )
         finally:
             await self.shutdown()
+
+    def _initialization_options(self):
+        """Build init options that hide resources/prompts capabilities.
+
+        The MCP SDK auto-advertises a capability whenever a matching handler is
+        registered. We register empty resources/prompts handlers only to silence
+        the Codex CLI's 30s startup probe, but the advertisement is a side
+        effect: Hermes (and any other capability-aware client) sees them and
+        synthesizes utility tools like ``mcp_<server>_list_resources`` that the
+        model then wastes turns calling. Strip both fields from the advertised
+        capabilities so the handlers still respond fast (returning ``[]``) but
+        clients don't expose the synthesized tools.
+        """
+        opts = self.server.create_initialization_options()
+        caps = opts.capabilities.model_copy(update={"resources": None, "prompts": None})
+        return opts.model_copy(update={"capabilities": caps})
