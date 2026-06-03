@@ -53,8 +53,9 @@ firehorse \
 
 For specific agents:
 - **`claude-code`** — requires [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed (tested with v2.1.88)
-- **`codex`** — requires [Codex CLI](https://github.com/openai/codex) installed (tested with v0.121.0)
+- **`codex`** — requires [Codex CLI](https://github.com/openai/codex) installed (tested with v0.133.0)
 - **`gemini`** — requires [Gemini CLI](https://github.com/google/gemini-cli) installed (tested with v0.38.2)
+- **`hermes`** — requires [Hermes Agent CLI](https://github.com/NousResearch/hermes-agent) installed (tested with v0.15.2). Install with `uv tool install hermes-agent`.
 
 ## Agent Types
 
@@ -63,8 +64,9 @@ For specific agents:
 | `resum` (default) | ReAct loop with compaction when context fills up | Anthropic, OpenAI, Google, OpenRouter, custom |
 | `claude-code` | Claude Code CLI with environment tools via MCP | Anthropic, OpenAI, Google, OpenRouter |
 | `codex` | Codex CLI with environment tools via MCP | OpenAI |
-| `react` | Direct LLM API Reason-Act loop| Anthropic, OpenAI, Google, OpenRouter, custom |
 | `gemini` | Gemini CLI with environment tools via MCP | Google |
+| `hermes` | Hermes Agent CLI with environment tools via MCP | Anthropic, OpenAI, OpenRouter, custom OpenAI-compatible |
+| `react` | Direct LLM API Reason-Act loop| Anthropic, OpenAI, Google, OpenRouter, custom |
 
 ## Thinking / Reasoning
 
@@ -100,7 +102,7 @@ Required:
   --model            Model identifier (e.g. anthropic/claude-sonnet-4-6)
 
 Options:
-  --agent            Agent type: claude-code, codex, gemini, react, resum (default: resum)
+  --agent            Agent type: claude-code, codex, gemini, hermes, react, resum (default: resum)
   --variant          Environment variant (e.g. 'mathnocode' for GeneralReasoning/MATH) (default: none)
   --split            Task split to evaluate (default: test)
   --n-concurrent     Max parallel trials (default: 1)
@@ -159,10 +161,11 @@ The events in between depend on whether the agent is API-based or CLI-based.
 - `tool_call` — tool invocation with name, arguments, and call ID (resum only; react embeds in the assistant event)
 - `tool_result` — tool output with explicit `reward` and `finished` fields
 
-**CLI agents** (`claude-code`, `codex`, `gemini`) pass through the raw CLI stream format:
+**CLI agents** (`claude-code`, `codex`, `gemini`, `hermes`) pass through the raw CLI stream format:
 - **claude-code**: Claude's `stream-json` events (`assistant`/`user` with `message.content` blocks)
 - **codex**: Codex's `--json` events (`item.started`/`item.completed` with nested `item.type`)
 - **gemini**: Gemini's `stream-json` events (`message` deltas, `tool_use`, `tool_result`)
+- **hermes**: Hermes runs in `-Q` quiet mode (no per-turn stream); the full transcript is exported post-hoc via `hermes sessions export` into `trial_*_hermes_session.json`.
 
 Reward signals are available in the `trial_*_rewards.jsonl` sidecar file and in OpenReward rollouts.
 
