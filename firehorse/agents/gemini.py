@@ -18,6 +18,7 @@ from openreward import (
 )
 from openreward.models import RolloutInfo
 
+from firehorse.agents._prompts import build_env_preference_rule
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.mcp.convert import strip_or_reward_marker
 
@@ -307,7 +308,10 @@ class GeminiAgent(BaseAgent):
 
             # Build system prompt + MCP tools section
             mcp_section = _build_gemini_mcp_prompt(env_tool_names, exclude_tools)
-            system_prompt = _UPSTREAM_SYSTEM_PROMPT + mcp_section
+            preference_rule = build_env_preference_rule(
+                env_tool_names, f"{_GEMINI_MCP_SERVER_NAME}_"
+            )
+            system_prompt = _UPSTREAM_SYSTEM_PROMPT + mcp_section + "\n\n" + preference_rule
 
             # Prepend system prompt to user prompt (Gemini CLI has no --system-prompt flag)
             full_prompt = f"{system_prompt}\n\n---\n\n{ctx.prompt_text}"

@@ -27,8 +27,11 @@ from openreward import (
 )
 from openreward.models import RolloutInfo
 
+from firehorse.agents._prompts import build_env_preference_rule
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.mcp.convert import strip_or_reward_marker
+
+_MCP_TOOL_PREFIX = "mcp__openreward__"
 
 # Map of lowercase env tool names -> Claude built-in tool names they should replace
 ENV_TO_BUILTIN = {
@@ -428,7 +431,11 @@ class ClaudeCodeAgent(BaseAgent):
                 cmd.extend(["--max-budget-usd", str(budget)])
 
             submission_reminder = _build_submission_reminder(env_tool_names)
-            full_prompt = f"{ctx.prompt_text}\n\nTermination Instructions:\n{termination_instructions}"
+            preference_rule = build_env_preference_rule(env_tool_names, _MCP_TOOL_PREFIX)
+            full_prompt = (
+                f"{ctx.prompt_text}\n\n{preference_rule}"
+                f"\n\nTermination Instructions:\n{termination_instructions}"
+            )
             if submission_reminder:
                 full_prompt = f"{full_prompt}\n\n{submission_reminder}"
             full_prompt = _sanitize_prompt(full_prompt)

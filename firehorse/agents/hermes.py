@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -22,12 +23,14 @@ import yaml
 
 from openreward import (
     AssistantMessage,
+    ReasoningItem,
     ToolCall,
     ToolResult,
     UserMessage,
 )
 from openreward.models import RolloutInfo
 
+from firehorse.agents._prompts import build_env_preference_rule
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.mcp.convert import strip_or_reward_marker
 
@@ -157,13 +160,18 @@ def _build_hermes_config(mcp_env: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def _log_toolcalls_to_rollout(
+_OR_REWARD_RE = re.compile(r'\[OR_REWARD:(\{[^}]+\})\]')
+
+
+def _replay_toolcalls_fallback(
     toolcalls_path: Path,
     rollout: Any,
 ) -> int:
-    """Read the MCP bridge's tool-call JSONL and replay it into the rollout.
+    """Last-resort rollout replay using only the MCP bridge's toolcalls JSONL.
 
-    Returns the number of tool calls logged.
+    Used when ``hermes sessions export`` fails — gives an incomplete trace
+    (no agent built-in tool calls, no reasoning, no inter-turn assistant
+    text) but at least preserves the environment-side interactions.
     """
     if not toolcalls_path.exists():
         return 0
@@ -200,8 +208,158 @@ def _log_toolcalls_to_rollout(
                 count += 1
             except Exception as e:
                 print(
-                    f"[hermes] rollout.log failed for {tool}: "
+                    f"[hermes] fallback rollout.log failed for {tool}: "
                     f"{type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+    return count
+
+
+async def _export_hermes_session(
+    hermes_home: Path,
+    session_id: str,
+) -> dict | None:
+    """Run ``hermes sessions export`` against the given HERMES_HOME and return
+    the parsed JSON object, or None on failure.
+
+    Hermes' ``-Q`` mode emits no per-turn events to stdout. The full
+    transcript — system prompt, user/assistant/tool messages, reasoning
+    blocks, tool calls and their arguments — is persisted to
+    ``$HERMES_HOME/state.db`` and only surfaced via this command. We call it
+    before the agent's tempdir cleanup so the SQLite store still exists.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        _HERMES_BIN, "sessions", "export", "-", "--session-id", session_id,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "HERMES_HOME": str(hermes_home)},
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        print(
+            f"[hermes] sessions export failed (exit {proc.returncode}): "
+            f"{stderr.decode(errors='replace').strip()[:300]}",
+            file=sys.stderr,
+        )
+        return None
+    text = stdout.decode(errors="replace").strip()
+    if not text:
+        return None
+    # Hermes exports as a single JSON object per session, one line in
+    # JSONL parlance. Robust to multi-session exports (we only requested
+    # one): take the first non-blank line.
+    line = text.splitlines()[0]
+    try:
+        return json.loads(line)
+    except json.JSONDecodeError as e:
+        print(f"[hermes] sessions export parse failed: {e}", file=sys.stderr)
+        return None
+
+
+def _replay_hermes_session_to_rollout(
+    session: dict,
+    rollout: Any,
+    skip_first_user: bool = True,
+) -> int:
+    """Replay a hermes sessions-export object into the OpenReward rollout.
+
+    Hermes' export schema (one JSON object per session) has a ``messages`` list
+    where each entry has:
+      - ``role``: "user" | "assistant" | "tool"
+      - ``content``: text
+      - ``reasoning`` / ``reasoning_content``: thinking blocks (assistant only)
+      - ``tool_calls``: [{call_id, function: {name, arguments}}] (assistant)
+      - ``tool_call_id`` / ``tool_name`` (tool role)
+
+    Walks them in order and logs:
+      - assistant ``reasoning`` → ``ReasoningItem``
+      - assistant ``content`` → ``AssistantMessage`` (when non-empty)
+      - assistant ``tool_calls[*]`` → ``ToolCall``
+      - tool role → ``ToolResult`` (with ``[OR_REWARD:{...}]`` parsed for
+        ``reward`` + ``is_finished``)
+
+    ``skip_first_user`` defaults True — firehorse already logged the prompt
+    as the initial ``UserMessage``; the export's first user message is the
+    same prompt and would be a duplicate.
+
+    Returns the number of items logged.
+    """
+    messages = session.get("messages") or []
+    count = 0
+    first_user_seen = False
+    for msg in messages:
+        role = msg.get("role")
+        if role == "user":
+            if skip_first_user and not first_user_seen:
+                first_user_seen = True
+                continue
+            content = msg.get("content") or ""
+            if content:
+                try:
+                    rollout.log(UserMessage(content=content))
+                    count += 1
+                except Exception as e:
+                    print(f"[hermes] rollout UserMessage failed: {e}", file=sys.stderr)
+        elif role == "assistant":
+            reasoning = msg.get("reasoning") or msg.get("reasoning_content") or ""
+            if reasoning:
+                try:
+                    rollout.log(ReasoningItem(content=reasoning))
+                    count += 1
+                except Exception as e:
+                    print(f"[hermes] rollout ReasoningItem failed: {e}", file=sys.stderr)
+            content = msg.get("content") or ""
+            if content:
+                try:
+                    rollout.log(AssistantMessage(content=content))
+                    count += 1
+                except Exception as e:
+                    print(f"[hermes] rollout AssistantMessage failed: {e}", file=sys.stderr)
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                name = fn.get("name") or tc.get("name") or ""
+                args = fn.get("arguments")
+                if args is None:
+                    args = "{}"
+                elif not isinstance(args, str):
+                    args = json.dumps(args)
+                call_id = tc.get("call_id") or tc.get("id") or ""
+                try:
+                    rollout.log(ToolCall(name=name, content=args, call_id=call_id))
+                    count += 1
+                except Exception as e:
+                    print(
+                        f"[hermes] rollout ToolCall failed for {name}: {e}",
+                        file=sys.stderr,
+                    )
+        elif role == "tool":
+            content_str = msg.get("content") or ""
+            if not isinstance(content_str, str):
+                content_str = json.dumps(content_str)
+            reward = None
+            finished = False
+            m = _OR_REWARD_RE.search(content_str)
+            if m:
+                try:
+                    rd = json.loads(m.group(1))
+                    reward = rd.get("r")
+                    finished = bool(rd.get("f", False))
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+            try:
+                rollout.log(
+                    ToolResult(
+                        content=strip_or_reward_marker(content_str),
+                        call_id=msg.get("tool_call_id") or "",
+                    ),
+                    reward=reward,
+                    is_finished=finished,
+                )
+                count += 1
+            except Exception as e:
+                print(
+                    f"[hermes] rollout ToolResult failed for "
+                    f"{msg.get('tool_name', '?')}: {e}",
                     file=sys.stderr,
                 )
     return count
@@ -286,15 +444,16 @@ class HermesAgent(BaseAgent):
             # Resolve model and provider routing.
             model_args, extra_env = _resolve_model_hermes(ctx.model, ctx.provider_url)
 
-            # Build prompt: MCP tool list + termination + submission reminder.
+            # Build prompt: MCP tool list + env-preference rule + termination + submission reminder.
             mcp_section = _build_mcp_tool_prompt(env_tool_names)
+            preference_rule = build_env_preference_rule(env_tool_names, _MCP_TOOL_PREFIX)
             termination = (
                 "Termination Instructions:\n"
                 "When a tool result contains [EPISODE COMPLETE], stop working "
                 "immediately — the task is done. Do not make any more tool calls "
                 "after seeing [EPISODE COMPLETE]."
             )
-            full_prompt = f"{ctx.prompt_text}\n\n{termination}"
+            full_prompt = f"{ctx.prompt_text}\n\n{preference_rule}\n\n{termination}"
             if mcp_section:
                 full_prompt = f"{full_prompt}\n{mcp_section}"
             submission_reminder = _build_submission_reminder(env_tool_names)
@@ -483,21 +642,70 @@ class HermesAgent(BaseAgent):
 
                 final_text = "".join(stdout_chunks).strip()
 
-                # Replay the bridge's tool-call log into the rollout so the
-                # openreward.ai view shows the full trace (hermes doesn't
-                # stream it to us during the run).
+                # Parse session_id off stderr (hermes -Q prints
+                # "session_id: <id>" before exit). Used to export the SQLite
+                # transcript while HERMES_HOME still exists.
+                session_id: str | None = None
+                for line in reversed(stderr_chunks):
+                    m = re.search(r"session_id:\s*([A-Za-z0-9_]+)", line)
+                    if m:
+                        session_id = m.group(1)
+                        break
+
+                # Export hermes' full session transcript (assistant text,
+                # reasoning, every tool call incl. built-ins) and replay it
+                # into the OpenReward rollout. Falls back to the bridge's
+                # MCP-only toolcalls log if the export fails for any reason.
                 replayed = 0
-                if main_rollout:
-                    replayed = _log_toolcalls_to_rollout(toolcalls_file, main_rollout)
-                    if final_text:
+                session_export: dict | None = None
+                if session_id:
+                    try:
+                        session_export = await _export_hermes_session(
+                            hermes_home, session_id,
+                        )
+                    except Exception as e:
+                        print(
+                            f"[hermes] sessions export raised: "
+                            f"{type(e).__name__}: {e}",
+                            file=sys.stderr,
+                        )
+                    if session_export is not None and log_dir:
+                        export_path = log_dir / f"trial_{trial_id}_hermes_session.json"
                         try:
-                            main_rollout.log(AssistantMessage(content=final_text))
-                        except Exception as e:
+                            export_path.write_text(
+                                json.dumps(session_export, indent=2)
+                            )
+                        except OSError as e:
                             print(
-                                f"[hermes] rollout assistant-message log failed: "
-                                f"{type(e).__name__}: {e}",
+                                f"[hermes] failed to persist session export: {e}",
                                 file=sys.stderr,
                             )
+
+                if main_rollout:
+                    if session_export is not None:
+                        replayed = _replay_hermes_session_to_rollout(
+                            session_export, main_rollout, skip_first_user=True,
+                        )
+                    else:
+                        # Best-effort fallback: at least replay the MCP
+                        # tool calls + final assistant text we captured.
+                        print(
+                            "[hermes] session export unavailable; falling back "
+                            "to MCP-only rollout replay",
+                            file=sys.stderr,
+                        )
+                        replayed = _replay_toolcalls_fallback(
+                            toolcalls_file, main_rollout,
+                        )
+                        if final_text:
+                            try:
+                                main_rollout.log(AssistantMessage(content=final_text))
+                            except Exception as e:
+                                print(
+                                    f"[hermes] rollout assistant-message log "
+                                    f"failed: {type(e).__name__}: {e}",
+                                    file=sys.stderr,
+                                )
 
                 if main_log:
                     summary_event = {
@@ -507,7 +715,8 @@ class HermesAgent(BaseAgent):
                         "model": ctx.model,
                         "bridge_result": result_data,
                         "stdout_final": final_text,
-                        "tool_calls_replayed": replayed,
+                        "session_id": session_id,
+                        "rollout_items_replayed": replayed,
                         "usage": {"duration_ms": duration_ms},
                     }
                     main_log.write(json.dumps(summary_event) + "\n")
