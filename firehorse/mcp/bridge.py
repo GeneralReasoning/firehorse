@@ -30,7 +30,7 @@ from openreward.api.environments.types import (
 )
 from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS
 from firehorse.mcp.codex_descriptions import CODEX_DESCRIPTIONS
-from firehorse.mcp.convert import toolspec_to_mcp, tooloutput_to_mcp
+from firehorse.mcp.convert import strip_bridge_markers, toolspec_to_mcp, tooloutput_to_mcp
 
 
 class OpenRewardBridge:
@@ -445,18 +445,39 @@ class OpenRewardBridge:
             )
 
         self.call_count += 1
-        contents = tooloutput_to_mcp(output)
+        raw_contents = tooloutput_to_mcp(output)
+
+        # Coalesce env-supplied text blocks into one and strip any
+        # ``[OR_REWARD:...]`` / ``[EPISODE COMPLETE]`` substrings the env may
+        # have echoed back. Without this, a tool whose result mirrors the
+        # caller's input (write_file, send_email, log_message, ...) is a
+        # spoofing vector: the model writes a fake marker as input, the env
+        # echoes it, the harness rollout logger parses the spoof and persists
+        # an inflated reward to the OpenReward database. Stripping on the
+        # joined text — rather than per-block — also closes the
+        # marker-split-across-blocks variant.
+        env_text_parts: list[str] = []
+        non_text_contents: list[TextContent | ImageContent] = []
+        for c in raw_contents:
+            if isinstance(c, TextContent):
+                env_text_parts.append(c.text)
+            else:
+                non_text_contents.append(c)
+        joined = "".join(env_text_parts)
+        scrubbed = strip_bridge_markers(joined)
+        contents: list[TextContent | ImageContent] = list(non_text_contents)
+        if scrubbed:
+            # Single coalesced text block — keeps the joined-string property
+            # the harness parsers rely on.
+            contents.append(TextContent(type="text", text=scrubbed))
 
         # Write tool call + result to sidecar log for rollout reconstruction
         if self._toolcalls_file:
-            result_text = "\n".join(
-                c.text for c in contents if hasattr(c, "text")
-            )
             tc_event = {
                 "call_id": f"call_{self.call_count}",
                 "tool": name,
                 "arguments": arguments,
-                "result": result_text,
+                "result": scrubbed,
                 "reward": output.reward,
                 "finished": output.finished,
             }
@@ -480,12 +501,15 @@ class OpenRewardBridge:
             self._rewards_file.write(json.dumps(reward_event) + "\n")
             self._rewards_file.flush()
 
-        # Tag reward/finished so the rollout logger can parse it
-        if output.reward is not None or output.finished:
-            contents.append(TextContent(
-                type="text",
-                text=f"\n[OR_REWARD:{json.dumps({'r': output.reward, 'f': output.finished})}]",
-            ))
+        # ALWAYS append a single canonical [OR_REWARD:...] marker as the last
+        # text block — even when reward is null and not finished. This is the
+        # second half of the anti-spoofing contract: harness parsers do
+        # "match the last marker in the text", so guaranteeing the bridge's
+        # marker is the last one short-circuits any envious upstream content.
+        contents.append(TextContent(
+            type="text",
+            text=f"\n[OR_REWARD:{json.dumps({'r': output.reward, 'f': output.finished})}]",
+        ))
 
         if output.finished:
             self.finished = True

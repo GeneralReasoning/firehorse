@@ -32,7 +32,7 @@ from openreward.models import RolloutInfo
 
 from firehorse.agents._prompts import build_env_preference_rule
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
-from firehorse.mcp.convert import strip_or_reward_marker
+from firehorse.mcp.convert import parse_or_reward_marker, strip_or_reward_marker
 
 # asyncio.create_subprocess_exec on Windows uses CreateProcess directly and
 # does not honor PATHEXT, so a bare "hermes" fails when only hermes.cmd is on
@@ -158,9 +158,6 @@ def _build_hermes_config(mcp_env: dict[str, str]) -> dict[str, Any]:
             "disabled_toolsets": list(_DISABLED_TOOLSETS),
         },
     }
-
-
-_OR_REWARD_RE = re.compile(r'\[OR_REWARD:(\{[^}]+\})\]')
 
 
 def _replay_toolcalls_fallback(
@@ -336,16 +333,9 @@ def _replay_hermes_session_to_rollout(
             content_str = msg.get("content") or ""
             if not isinstance(content_str, str):
                 content_str = json.dumps(content_str)
-            reward = None
-            finished = False
-            m = _OR_REWARD_RE.search(content_str)
-            if m:
-                try:
-                    rd = json.loads(m.group(1))
-                    reward = rd.get("r")
-                    finished = bool(rd.get("f", False))
-                except (json.JSONDecodeError, AttributeError):
-                    pass
+            # Match the *last* [OR_REWARD:{...}] tag; the bridge appends its
+            # authoritative marker after stripping env-supplied ones.
+            reward, finished = parse_or_reward_marker(content_str)
             try:
                 rollout.log(
                     ToolResult(
