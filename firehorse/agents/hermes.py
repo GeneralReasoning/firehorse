@@ -30,7 +30,6 @@ from openreward import (
 )
 from openreward.models import RolloutInfo
 
-from firehorse.agents._prompts import build_env_preference_rule
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
 from firehorse.mcp.convert import parse_or_reward_marker, strip_or_reward_marker
 
@@ -434,16 +433,15 @@ class HermesAgent(BaseAgent):
             # Resolve model and provider routing.
             model_args, extra_env = _resolve_model_hermes(ctx.model, ctx.provider_url)
 
-            # Build prompt: MCP tool list + env-preference rule + termination + submission reminder.
+            # Build prompt: MCP tool list + termination + submission reminder.
             mcp_section = _build_mcp_tool_prompt(env_tool_names)
-            preference_rule = build_env_preference_rule(env_tool_names, _MCP_TOOL_PREFIX)
             termination = (
                 "Termination Instructions:\n"
                 "When a tool result contains [EPISODE COMPLETE], stop working "
                 "immediately — the task is done. Do not make any more tool calls "
                 "after seeing [EPISODE COMPLETE]."
             )
-            full_prompt = f"{ctx.prompt_text}\n\n{preference_rule}\n\n{termination}"
+            full_prompt = f"{ctx.prompt_text}\n\n{termination}"
             if mcp_section:
                 full_prompt = f"{full_prompt}\n{mcp_section}"
             submission_reminder = _build_submission_reminder(env_tool_names)
