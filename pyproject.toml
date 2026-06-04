@@ -1,13 +1,14 @@
 [project]
 name = "firehorse-cli"
-version = "0.1.1"
+version = "0.1.2"
 description = "Agent evaluation harness for OpenReward environments"
 authors = [
     {name = "GR Inc", email = "hello@gr.inc"}
 ]
+requires-python = ">=3.11"
 
 dependencies = [
-    "openreward>=0.1.97",
+    "openreward>=0.1.126",
     "mcp>=1.0.0",
 ]
 
