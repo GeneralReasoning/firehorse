@@ -1,6 +1,7 @@
 [project]
 name = "firehorse-cli"
-version = "0.1.2"
+version = "0.1.3"
+readme = "README.md"
 description = "Agent evaluation harness for OpenReward environments"
 authors = [
     {name = "GR Inc", email = "hello@gr.inc"}
