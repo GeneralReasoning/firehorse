@@ -28,6 +28,7 @@ from openreward.api.environments.types import (
     ToolCallError,
     ToolSpec,
 )
+from openreward.api.errors import SessionTerminatedError, ToolFailed
 from firehorse.mcp.builtin_descriptions import BUILTIN_DESCRIPTIONS
 from firehorse.mcp.codex_descriptions import CODEX_DESCRIPTIONS
 from firehorse.mcp.convert import strip_bridge_markers, toolspec_to_mcp, tooloutput_to_mcp
@@ -48,6 +49,13 @@ class OpenRewardBridge:
         self._toolcalls_file: Any = None  # file handle for tool-call log
         self.tools: list[ToolSpec] = []
         self.finished = False
+        # Set once the SDK reports the underlying session is dead — a tool
+        # raised server-side (ToolFailed) or the server signalled termination
+        # (SessionTerminatedError). The SDK poisons the session on these, so
+        # every subsequent call_tool would raise SessionTerminatedError; we
+        # short-circuit instead of feeding the agent a stream of dead-session
+        # errors. See OpenReward SDK #1780 (typed errors, session poisoning).
+        self._session_terminated = False
         self.last_reward: float | None = None
         self.total_reward: float = 0.0
         self.call_count: int = 0
@@ -420,8 +428,28 @@ class OpenRewardBridge:
                 isError=True,
             )
 
+        if self._session_terminated:
+            return CallToolResult(
+                content=[TextContent(type="text", text="Session terminated. No more tool calls allowed.")],
+                isError=True,
+            )
+
         try:
             output = await self._session.call_tool(name, arguments)
+        except (SessionTerminatedError, ToolFailed) as e:
+            # The SDK has poisoned the session (a tool raised server-side, or
+            # the server terminated the session). It won't recover — mark it so
+            # subsequent calls short-circuit rather than each re-raising.
+            self._session_terminated = True
+            try:
+                with open("/tmp/firehorse_mcp_debug.log", "a") as f:
+                    f.write(f"{type(e).__name__}({name}): {e}\n")
+            except Exception:
+                pass
+            return CallToolResult(
+                content=[TextContent(type="text", text=f"Session terminated: {e}")],
+                isError=True,
+            )
         except ToolCallError as e:
             try:
                 with open("/tmp/firehorse_mcp_debug.log", "a") as f:

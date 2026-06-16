@@ -7,6 +7,7 @@ import time
 from typing import Any, TYPE_CHECKING
 
 import aiohttp
+from openreward.api.errors import SessionTerminatedError, ToolFailed
 
 from firehorse.agents.base import AgentResult, TrialContext
 from firehorse.config import TrialConfig
@@ -190,6 +191,19 @@ async def run_trial(
             cost_usd=result.cost_usd,
             input_tokens=result.input_tokens,
             output_tokens=result.output_tokens,
+        )
+    except (SessionTerminatedError, ToolFailed) as e:
+        # An in-process agent (react/resum) re-raises these when the SDK
+        # poisons the session (a tool raised server-side, or the server
+        # terminated it). The session is dead; end the trial cleanly with a
+        # clearly-labelled error rather than as an opaque failure (SDK #1780).
+        duration = time.monotonic() - start
+        return TrialResult(
+            task_index=config.task_index,
+            task_spec=config.task_spec,
+            success=False,
+            error=f"session terminated: {type(e).__name__}: {e}",
+            duration_seconds=duration,
         )
     except Exception as e:
         duration = time.monotonic() - start

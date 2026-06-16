@@ -15,6 +15,7 @@ from openreward import (
     ToolResult,
     UserMessage,
 )
+from openreward.api.errors import SessionTerminatedError, ToolFailed
 from openreward.models import RolloutInfo
 
 from firehorse.agents.base import AgentResult, BaseAgent, TrialContext
@@ -253,6 +254,11 @@ class ReSumAgent(BaseAgent):
                     try:
                         result = await ctx.session.call_tool(tc.name, tc.arguments)
                     except Exception as e:
+                        # A poisoned/terminated session can't recover — end the
+                        # trajectory cleanly rather than looping dead-session
+                        # errors for the rest of the turn budget (SDK #1780).
+                        if isinstance(e, (SessionTerminatedError, ToolFailed)):
+                            raise
                         error_output = f"ERROR: Tool call failed: {e}"
                         provider.append_tool_result(messages, tc.id, tc.name, error_output)
                         self._log_tool_result(log_file, rollout, tc.id, error_output, None, False)

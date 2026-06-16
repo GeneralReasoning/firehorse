@@ -9,7 +9,10 @@ authors = [
 requires-python = ">=3.11"
 
 dependencies = [
-    "openreward>=0.1.126",
+    # 0.1.127 introduced the typed error hierarchy (openreward.api.errors:
+    # ToolFailed / SessionTerminatedError) + session poisoning on tool failure,
+    # which firehorse's tool-error handling depends on.
+    "openreward>=0.1.127",
     "mcp>=1.0.0",
 ]
 

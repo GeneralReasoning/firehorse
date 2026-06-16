@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, IO
 
 from openreward import SystemMessage, UserMessage
+from openreward.api.errors import SessionTerminatedError, ToolFailed
 from openreward.models import RolloutInfo
 
 from firehorse.agents.base import BaseAgent, AgentResult, TrialContext
@@ -430,6 +431,11 @@ class ReactAgent(BaseAgent):
                         "content": content,
                     })
                 except Exception as e:
+                    # A poisoned/terminated session can't recover — end the
+                    # trajectory cleanly rather than spamming dead-session
+                    # errors for the rest of the turn budget (SDK #1780).
+                    if isinstance(e, (SessionTerminatedError, ToolFailed)):
+                        raise
                     tool_result_blocks.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -584,6 +590,8 @@ class ReactAgent(BaseAgent):
                             rollout_info=_final_info() if finished else None,
                         )
                 except Exception as e:
+                    if isinstance(e, (SessionTerminatedError, ToolFailed)):
+                        raise
                     output_item = {
                         "type": "function_call_output",
                         "call_id": item.call_id,
@@ -733,6 +741,8 @@ class ReactAgent(BaseAgent):
                         )
                     )
                 except Exception as e:
+                    if isinstance(e, (SessionTerminatedError, ToolFailed)):
+                        raise
                     tool_response_parts.append(
                         types.Part.from_function_response(
                             name=fc.name,
@@ -908,6 +918,8 @@ class ReactAgent(BaseAgent):
                         )
                     messages.append(tool_msg)
                 except Exception as e:
+                    if isinstance(e, (SessionTerminatedError, ToolFailed)):
+                        raise
                     tool_msg = {
                         "role": "tool",
                         "tool_call_id": tc.id,
