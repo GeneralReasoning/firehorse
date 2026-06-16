@@ -27,8 +27,6 @@ jobs:
         run: uv sync --extra dev --extra react --extra resum
       - name: uv run pytest
         run: uv run pytest -m "not integration"
-        env:
-          OPENREWARD_API_KEY: ${{ secrets.OPENREWARD_API_KEY }}
 
   version-check:
     name: Check version
