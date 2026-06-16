@@ -6,6 +6,8 @@ from unittest import mock
 
 import pytest
 
+from openreward.api.errors import SessionTerminatedError, ToolFailed
+
 from firehorse.agents.base import AgentResult
 from firehorse.trial import _is_mcp_failure, _MCP_RETRY_MAX, _MCP_RETRY_BASE_DELAY, run_trial
 from firehorse.config import TrialConfig
@@ -173,3 +175,44 @@ class TestRunTrialRetry:
         assert mock_sleep.call_count == 2
         mock_sleep.assert_any_call(2.0)
         mock_sleep.assert_any_call(4.0)
+
+
+# ---------------------------------------------------------------------------
+# Session-termination handling (SDK #1780: typed errors + session poisoning)
+# ---------------------------------------------------------------------------
+
+class TestSessionTermination:
+    @pytest.mark.asyncio
+    async def test_session_terminated_ends_trial_cleanly(self):
+        # An in-process agent re-raises SessionTerminatedError when the SDK
+        # poisons the session; run_trial should end with a clean, labelled
+        # failure rather than an opaque error or a hang.
+        env = _make_mock_env()
+        agent = mock.AsyncMock()
+        agent.run = mock.AsyncMock(
+            side_effect=SessionTerminatedError("server terminated", kind="environment")
+        )
+        config = _make_trial_config()
+        task = mock.MagicMock(task_spec={"id": "test-task"})
+
+        result = await run_trial(env, task, agent, config)
+
+        assert result.success is False
+        assert "session terminated" in result.error
+        assert "SessionTerminatedError" in result.error
+        assert agent.run.call_count == 1  # no retry against a dead session
+
+    @pytest.mark.asyncio
+    async def test_tool_failed_ends_trial_cleanly(self):
+        env = _make_mock_env()
+        agent = mock.AsyncMock()
+        agent.run = mock.AsyncMock(side_effect=ToolFailed("env tool raised"))
+        config = _make_trial_config()
+        task = mock.MagicMock(task_spec={"id": "test-task"})
+
+        result = await run_trial(env, task, agent, config)
+
+        assert result.success is False
+        assert "session terminated" in result.error
+        assert "ToolFailed" in result.error
+        assert agent.run.call_count == 1
