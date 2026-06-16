@@ -1,0 +1,36 @@
+name: "Firehorse: Pull request checks"
+
+on:
+  pull_request:
+    branches:
+      - "main"
+
+jobs:
+  run-tests:
+    name: Run tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          version: "0.10.6"
+          cache-dependency-glob: |
+            **/pyproject.toml
+            **/uv.lock
+      - name: uv sync
+        run: uv sync --extra dev --extra react --extra resum
+      - name: uv run pytest
+        run: uv run pytest -m "not integration"
+
+  version-check:
+    name: Check version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check version is bumped
+        uses: ./.github/workflows/check-pypi-version-bump
+        with:
+          pyproject-path: pyproject.toml
+          package-name: firehorse-cli

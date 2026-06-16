@@ -74,8 +74,17 @@ class TestCodexCliWiring:
             captured["cmd"] = list(args)
             captured["env"] = kw.get("env", {})
 
+            class _StdinStub:
+                def write(self, _data):
+                    pass
+                async def drain(self):
+                    return None
+                def close(self):
+                    pass
+
             class P:
                 returncode = 0
+                stdin = _StdinStub()
                 stdout = asyncio.StreamReader()
                 stderr = asyncio.StreamReader()
                 async def wait(self):
@@ -140,8 +149,17 @@ class TestCodexCliWiring:
         async def fake_exec(*args, **kw):
             captured["cmd"] = list(args)
 
+            class _StdinStub:
+                def write(self, _data):
+                    pass
+                async def drain(self):
+                    return None
+                def close(self):
+                    pass
+
             class P:
                 returncode = 0
+                stdin = _StdinStub()
                 stdout = asyncio.StreamReader()
                 stderr = asyncio.StreamReader()
                 async def wait(self):
