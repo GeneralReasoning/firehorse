@@ -1,0 +1,75 @@
+name: "Check PyPI version bump"
+description: "Verify a pyproject.toml version is a valid PEP 440 bump from the latest published PyPI version."
+
+inputs:
+  pyproject-path:
+    description: "Path to the pyproject.toml file."
+    required: true
+  package-name:
+    description: "Package name on PyPI to compare against."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Check version is bumped
+      shell: bash
+      env:
+        PYPROJECT_PATH: ${{ inputs.pyproject-path }}
+        PACKAGE_NAME: ${{ inputs.package-name }}
+      run: |
+        python3 -m pip install --quiet packaging
+        python3 - <<'EOF'
+        import os
+        import sys
+        import tomllib
+        import json
+        import urllib.request
+        from packaging.version import Version, InvalidVersion
+
+        pyproject_path = os.environ["PYPROJECT_PATH"]
+        package_name = os.environ["PACKAGE_NAME"]
+
+        with open(pyproject_path, "rb") as f:
+            pr_version_str = tomllib.load(f)["project"]["version"]
+
+        url = f"https://pypi.org/pypi/{package_name}/json"
+        with urllib.request.urlopen(url) as resp:
+            pypi_version_str = json.loads(resp.read())["info"]["version"]
+
+        print(f"PyPI version:  {pypi_version_str}")
+        print(f"PR version:    {pr_version_str}")
+
+        def fail(msg):
+            print(f"::error::{msg}")
+            sys.exit(1)
+
+        try:
+            pr = Version(pr_version_str)
+            pypi = Version(pypi_version_str)
+        except InvalidVersion as e:
+            fail(f"Invalid PEP 440 version: {e}")
+
+        if pr <= pypi:
+            fail(f"PR version {pr_version_str} must be greater than PyPI version {pypi_version_str}.")
+
+        def pad(rel):
+            return (tuple(rel) + (0, 0, 0))[:3]
+
+        pr_maj, pr_min, pr_pat = pad(pr.release)
+        main_maj, main_min, main_pat = pad(pypi.release)
+
+        if pr.release == pypi.release:
+            # Same release tuple, pr > pypi — dev/pre/post iteration on the same release.
+            pass
+        elif pr_maj == main_maj + 1 and pr_min == 0 and pr_pat == 0:
+            pass  # major bump
+        elif pr_maj == main_maj and pr_min == main_min + 1 and pr_pat == 0:
+            pass  # minor bump
+        elif pr_maj == main_maj and pr_min == main_min and pr_pat == main_pat + 1:
+            pass  # patch bump
+        else:
+            fail(f"Version must be a valid semver bump from PyPI ({pypi_version_str}). Got {pr_version_str}.")
+
+        print("Version check passed.")
+        EOF

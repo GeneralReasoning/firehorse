@@ -1,0 +1,38 @@
+name: "Notify on build failure"
+description: "Posts a Slack message tagging the actor when a workflow fails"
+
+inputs:
+  slack_bot_token:
+    description: "Slack bot token used to post the failure message"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Resolve Slack user
+      id: resolve_user
+      shell: bash
+      run: |
+        declare -A mapping
+        mapping["henryjcee"]="U0AFQSYRHFC"
+        mapping["RJT1990"]="U090LHQ5H45"
+        mapping["thomasjgrady"]="U090LHKK3GD"
+        mapping["kipgparker"]="U090LHMRK1B"
+        mapping["izarov"]="U09THRK8DGB"
+        mapping["anthonyhartshorn"]="U0APL7DV1S9"
+
+        slack_id="${mapping[${{ github.actor }}]}"
+        if [ -n "$slack_id" ]; then
+          echo "mention=<@${slack_id}>" >> "$GITHUB_OUTPUT"
+        else
+          echo "mention=${{ github.actor }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Post Slack notification
+      uses: slackapi/slack-github-action@v3
+      with:
+        method: chat.postMessage
+        token: ${{ inputs.slack_bot_token }}
+        payload: |
+          channel: "C0AMR3NP3G9"
+          text: ":red_circle: Build failed: *${{ github.workflow }}*\nBranch: `${{ github.ref_name }}`\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\nTriggered by: ${{ steps.resolve_user.outputs.mention }}"
