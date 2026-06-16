@@ -20,6 +20,7 @@ runs:
         mapping["kipgparker"]="U090LHMRK1B"
         mapping["izarov"]="U09THRK8DGB"
         mapping["anthonyhartshorn"]="U0APL7DV1S9"
+        mapping["Achitech20"]="U0ATZ436KEU"
 
         slack_id="${mapping[${{ github.actor }}]}"
         if [ -n "$slack_id" ]; then
@@ -34,5 +35,5 @@ runs:
         method: chat.postMessage
         token: ${{ inputs.slack_bot_token }}
         payload: |
-          channel: "C0AMR3NP3G9"
+          channel: "C0ARJ2MFR7W"
           text: ":red_circle: Build failed: *${{ github.workflow }}*\nBranch: `${{ github.ref_name }}`\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\nTriggered by: ${{ steps.resolve_user.outputs.mention }}"

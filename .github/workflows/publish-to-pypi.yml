@@ -87,7 +87,7 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             {
-              "channel": "C09FUFSGLP6",
+              "channel": "C0ARJ2MFR7W",
               "text": ":fire: firehorse-cli version `${{ env.PKG_VERSION }}` <https://pypi.org/project/firehorse-cli/${{ env.PKG_VERSION }}/|published to PyPI>",
               "blocks": [
                 {
